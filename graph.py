@@ -21,6 +21,7 @@ from __future__ import annotations
 import uuid
 import asyncio
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Dict, Any, Literal
 
 from langgraph.graph import StateGraph, END, START
@@ -259,7 +260,7 @@ def _make_build_dispatch(analytics: PipelineAnalytics | None):
     async def _node(state: AgentState) -> Dict[str, Any]:
         print("\n[PIPELINE] ═══ PHASE 2: BUILD (parallel) ═══")
         if analytics:
-            analytics.start_phase("BUILD")
+            await analytics.start_phase("BUILD")
         return {"current_phase": 2}
     return _node
 
@@ -268,7 +269,7 @@ def _make_build_sync(analytics: PipelineAnalytics | None):
     async def _node(state: AgentState) -> Dict[str, Any]:
         print("[PIPELINE] ═══ Build phase complete — syncing outputs ═══")
         if analytics:
-            analytics.end_phase("BUILD", ["PIXEL", "FORGE", "VAULT", "CIPHER", "WEAVE"])
+            await analytics.end_phase("BUILD", ["PIXEL", "FORGE", "VAULT", "CIPHER", "WEAVE"])
         return {"current_phase": 2}
     return _node
 
