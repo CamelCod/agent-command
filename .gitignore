@@ -39,3 +39,10 @@ artifacts/
 # OS
 .DS_Store
 Thumbs.db
+
+# Local archive (kept locally, not tracked)
+archive/
+
+# VSCode / personal workspace
+*.code-workspace
+.serena/
