@@ -13,11 +13,12 @@ import time
 import os
 import re
 import base64
+import secrets
 import urllib.parse
 from datetime import datetime
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, BackgroundTasks, HTTPException, Request, status
-from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse
+from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
@@ -473,46 +474,93 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
 # ─────────────────────────────────────────────────────────────────
 #
 # Security design:
-#   1. Client requests GET /v1/auth/github → server builds GitHub
-#      authorize URL with client_id + redirect_uri, returns 302.
+#   1. Client requests GET /v1/auth/github → server:
+#      a. Generates a cryptographically random state (secrets.token_urlsafe(32))
+#      b. Stores it in the signed session cookie
+#      c. Returns a redirect to GitHub's authorize URL
 #   2. User authorizes in GitHub → GitHub redirects to
-#      GET /v1/auth/github/callback?code=XXX
-#   3. Server exchanges code for access_token (POST to GitHub, server-only).
-#      The access_token NEVER goes to the browser — it is stored in
-#      the signed session cookie only.
+#      GET /v1/auth/github/callback?code=XXX&state=YYY
+#   3. On callback:
+#      a. Strict equality check: state param == stored session state (prevents CSRF)
+#      b. If user clicks Cancel: GitHub redirects to ?error=access_denied →
+#         server redirects to frontend with ?github_error=cancelled (graceful UX)
+#      c. Otherwise: exchange code for access_token (POST to GitHub, server-only)
+#         The access_token NEVER goes to the browser — stored in signed session cookie.
 #   4. Client polls GET /v1/user/session to know when auth is complete.
 # ─────────────────────────────────────────────────────────────────
+
+def _set_session_cookie(session: dict, response, https_only: bool) -> None:
+    """
+    Sign a session dict and set it as the agentcraft_session cookie.
+    """
+    cookie_data = urllib.parse.urlencode({**session})
+    signer = itsdangerous.Signer(_get_session_secret())
+    signed = signer.sign(cookie_data.encode())
+    response.set_cookie(
+        key="agentcraft_session",
+        value=signed.decode(),
+        httponly=True,
+        samesite="lax",
+        max_age=60 * 60 * 24 * 30,
+        secure=https_only,
+    )
+
 
 @app.get("/v1/auth/github")
 async def github_oauth_start(request: Request):
     """
-    Redirect the browser to GitHub's OAuth authorize page.
+    Generate a random state, store it in the signed session, and redirect
+    the browser to GitHub's OAuth authorize page.
     """
-    import urllib.parse
+    import secrets
 
     client_id = os.getenv("GITHUB_CLIENT_ID")
     if not client_id:
         raise HTTPException(status_code=503, detail="GitHub OAuth not configured.")
 
     callback_url = os.getenv("GITHUB_CALLBACK_URL", "http://localhost:8765/v1/auth/github/callback")
-    params = urllib.parse.urlencode({
-        "client_id": client_id,
-        "redirect_uri": callback_url,
-        "scope": "repo",
-        "state": "agentcraft",  # In production, use a proper CSRF token
-    })
-    github_url = f"https://github.com/login/oauth/authorize?{params}"
-    return {"authorize_url": github_url}
+
+    # Cryptographically random CSRF state — stored in session before redirect
+    oauth_state = secrets.token_urlsafe(32)
+
+    # Build the session with the state, then set the cookie before redirect
+    session = dict(request.state._session or {})
+    session["oauth_state"] = oauth_state
+
+    github_url = (
+        f"https://github.com/login/oauth/authorize"
+        f"?{urllib.parse.urlencode({'client_id': client_id, 'redirect_uri': callback_url, 'scope': 'repo', 'state': oauth_state})}"
+    )
+
+    https_only = os.getenv("ENVIRONMENT") == "production"
+    response = RedirectResponse(url=github_url, status_code=302)
+    _set_session_cookie(session, response, https_only=https_only)
+    return response
 
 
 @app.get("/v1/auth/github/callback")
-async def github_oauth_callback(request: Request, code: str = "", error: str = ""):
+async def github_oauth_callback(request: Request, code: str = "", error: str = "", state: str = ""):
     """
     Exchange the OAuth authorization code for an access token.
-    The token is stored in the signed session cookie — never sent to the browser.
+    Strict state validation prevents CSRF. Cancelled auth redirects gracefully.
+    The access token is stored in the signed session cookie only.
     """
+    https_only = os.getenv("ENVIRONMENT") == "production"
+
+    # ── User clicked Cancel — GitHub redirects with error param ──────────────
     if error:
-        raise HTTPException(status_code=400, detail=f"GitHub OAuth error: {error}")
+        response = RedirectResponse(url="/?github_error=cancelled", status_code=302)
+        # Still set/clear session on cancel
+        session = dict(request.state._session or {})
+        session.pop("oauth_state", None)
+        _set_session_cookie(session, response, https_only=https_only)
+        return response
+
+    # ── CSRF state validation — strict equality check ─────────────────────
+    stored_state = request.state._session.get("oauth_state") if request.state._session else None
+    if not stored_state or stored_state != state:
+        response = RedirectResponse(url="/?github_error=csrf", status_code=302)
+        return response
 
     client_id = os.getenv("GITHUB_CLIENT_ID")
     client_secret = os.getenv("GITHUB_CLIENT_SECRET")
@@ -539,7 +587,8 @@ async def github_oauth_callback(request: Request, code: str = "", error: str = "
 
     access_token = token_data.get("access_token")
     if not access_token:
-        raise HTTPException(status_code=400, detail="Failed to obtain access token from GitHub.")
+        response = RedirectResponse(url="/?github_error=token", status_code=302)
+        return response
 
     # Look up the GitHub username using the access token
     username = "github_user"
@@ -554,53 +603,30 @@ async def github_oauth_callback(request: Request, code: str = "", error: str = "
         if user_resp.status_code == 200:
             username = user_resp.json().get("login", username)
 
-    # Store in session (signed cookie, httpOnly — browser never sees raw token)
+    # Build updated session: store GitHub token, clear CSRF state
     session = dict(request.state._session or {})
     session["github_access_token"] = access_token
     session["github_username"] = username
     session["is_premium"] = session.get("is_premium", False)
+    session.pop("oauth_state", None)  # Clear state after successful use (one-time)
 
-    # Serialize to cookie via Starlette's session mechanism
-    response = {"status": "ok", "username": username}
-    from fastapi.responses import JSONResponse
-    import urllib.parse as _urlparse, time as _time
-
-    cookie_data = _urlparse.urlencode({**session})
-    signer = itsdangerous.Signer(_get_session_secret())
-    signed = signer.sign(cookie_data.encode())
-
-    resp = JSONResponse(response)
-    resp.set_cookie(
-        key="agentcraft_session",
-        value=signed.decode(),
-        httponly=True,
-        samesite="lax",
-        max_age=60 * 60 * 24 * 30,
-    )
-    return resp
+    # Redirect to the app root after successful auth — frontend polls /v1/user/session
+    response = RedirectResponse(url="/?github_connected=1", status_code=302)
+    _set_session_cookie(session, response, https_only=https_only)
+    return response
 
 
 @app.get("/v1/auth/github/logout")
 async def github_logout(request: Request):
-    """Clear the GitHub token from the session."""
+    """Clear the GitHub token and oauth_state from the session."""
     session = dict(request.state._session or {})
     session.pop("github_access_token", None)
     session.pop("github_username", None)
+    session.pop("oauth_state", None)
 
-    import urllib.parse as _urlparse
-    cookie_data = _urlparse.urlencode({**session})
-    signer = itsdangerous.Signer(_get_session_secret())
-    signed = signer.sign(cookie_data.encode())
-
-    resp = {"status": "ok"}
-    response = JSONResponse(resp)
-    response.set_cookie(
-        key="agentcraft_session",
-        value=signed.decode(),
-        httponly=True,
-        samesite="lax",
-        max_age=60 * 60 * 24 * 30,
-    )
+    https_only = os.getenv("ENVIRONMENT") == "production"
+    response = JSONResponse({"status": "ok"})
+    _set_session_cookie(session, response, https_only=https_only)
     return response
 
 

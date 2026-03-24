@@ -894,13 +894,11 @@ async function exportToGithub() {
 
   // Check if GitHub is connected via session
   if (!STATE.githubConnected) {
-    // Initiate OAuth — redirect to our authorize URL
-    try {
-      const { authorize_url } = await fetch('/v1/auth/github').then(r => r.json());
-      window.location.href = authorize_url;
-    } catch {
-      appendBuildLog('GITHUB', 'Could not reach auth endpoint. Is the server running?', 'error');
-    }
+    // Initiate OAuth — redirect to our authorize URL.
+    // The server returns a 302 redirect to GitHub's OAuth endpoint.
+    // After the user approves/denies, GitHub redirects back to /?github_connected=1
+    // or /?github_error=cancelled|csrf|token, which we handle in handleOAuthRedirectParams().
+    window.location.href = '/v1/auth/github';
     return;
   }
 
