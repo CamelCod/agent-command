@@ -403,6 +403,9 @@ class KimiRateLimiter:
                 wait = self._tpd_reset_at - time.time()
                 raise Exception(f"TPD limit reached. Retry in {wait:.0f}s")
 
+            # Track TPD — inside lock to prevent race condition
+            self._tpd_used += token_count
+
         # Acquire concurrency slot
         await self._semaphore.acquire()
 
@@ -431,9 +434,6 @@ class KimiRateLimiter:
                     wait = 60 - (time.time() - self._tpm_bucket[0][0])
                     if wait > 0:
                         await asyncio.sleep(wait)
-
-                # Track TPD
-                self._tpd_used += token_count
 
         except Exception:
             self._semaphore.release()
@@ -521,6 +521,7 @@ class BaseAgent:
         genome: AgentGenome,
         user_message: str,
         max_tokens: int = 4096,
+        timeout_ms: int = 120000,
     ) -> str:
         """
         Invoke Kimi (Moonshot) with the agent's current genome as system prompt.
@@ -562,29 +563,36 @@ class BaseAgent:
             if genome["model"].startswith("kimi-"):
                 temperature = 1.0
 
-            # Retry with exponential backoff for rate limit / overload errors
+            # Retry with exponential backoff for rate limit / overload errors / timeouts
             last_error = None
             for attempt in range(4):
                 try:
-                    response = await self.client.chat.completions.create(
-                        model=genome["model"],
-                        max_tokens=max_tokens,
-                        temperature=temperature,
-                        messages=[
-                            {
-                                "role": "system",
-                                "content": (
-                                    DISCIPLINED_PROGRAMMER_PROLOGUE + "\n\n"
-                                    + genome["system_prompt"]
-                                    if self.agent_id in CODE_GENERATING_AGENTS
-                                    else genome["system_prompt"]
-                                ),
-                            },
-                            {"role": "user", "content": user_message},
-                        ]
+                    response = await asyncio.wait_for(
+                        self.client.chat.completions.create(
+                            model=genome["model"],
+                            max_tokens=max_tokens,
+                            temperature=temperature,
+                            messages=[
+                                {
+                                    "role": "system",
+                                    "content": (
+                                        DISCIPLINED_PROGRAMMER_PROLOGUE + "\n\n"
+                                        + genome["system_prompt"]
+                                        if self.agent_id in CODE_GENERATING_AGENTS
+                                        else genome["system_prompt"]
+                                    ),
+                                },
+                                {"role": "user", "content": user_message},
+                            ]
+                        ),
+                        timeout=timeout_ms / 1000,
                     )
                     last_error = None
                     break
+                except asyncio.TimeoutError:
+                    print(f"[{self.agent_id}] LLM call timed out after {timeout_ms}ms — retrying ({attempt+1}/4)")
+                    await asyncio.sleep(2 ** attempt)
+                    continue
                 except Exception as e:
                     last_error = e
                     err_str = str(e)

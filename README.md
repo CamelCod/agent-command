@@ -85,7 +85,7 @@ git clone <this-repo>
 cd agent_command
 pip install -r requirements.txt
 cp .env.example .env
-# Edit .env — add your ANTHROPIC_API_KEY
+# Edit .env — add your MOONSHOT_API_KEY (or KIMI_API_KEY)
 ```
 
 ## Usage

@@ -178,9 +178,16 @@ async def _build_sync(state: AgentState) -> Dict[str, Any]:
 
 
 async def _quality_gate(state: AgentState) -> Dict[str, Any]:
-    """Evaluate QA + review scores against thresholds."""
-    probe_score = state.get("probe_score", 0.0)
-    lens_score  = state.get("lens_score", 0.0)
+    """Evaluate QA + review scores against thresholds using actual ECHO composite scores."""
+    echo_reports = state.get("echo_reports", [])
+
+    # Get the most recent ECHO report for PROBE and LENS
+    probe_reports = [r for r in echo_reports if r.get("agent_id") == "PROBE"]
+    lens_reports  = [r for r in echo_reports if r.get("agent_id") == "LENS"]
+
+    probe_score = probe_reports[-1]["composite_score"] if probe_reports else 0.0
+    lens_score  = lens_reports[-1]["composite_score"]  if lens_reports  else 0.0
+
     retry_count = state.get("quality_retry_count", 0)
 
     passed = (
@@ -268,8 +275,15 @@ def _make_build_sync(analytics: PipelineAnalytics | None):
 
 def _make_quality_gate(analytics: PipelineAnalytics | None):
     async def _node(state: AgentState) -> Dict[str, Any]:
-        probe_score = state.get("probe_score", 0.0)
-        lens_score  = state.get("lens_score", 0.0)
+        echo_reports = state.get("echo_reports", [])
+
+        # Get actual ECHO composite scores from PROBE and LENS reports
+        probe_reports = [r for r in echo_reports if r.get("agent_id") == "PROBE"]
+        lens_reports  = [r for r in echo_reports if r.get("agent_id") == "LENS"]
+
+        probe_score = probe_reports[-1]["composite_score"] if probe_reports else 0.0
+        lens_score  = lens_reports[-1]["composite_score"]  if lens_reports  else 0.0
+
         retry_count = state.get("quality_retry_count", 0)
 
         passed = (
