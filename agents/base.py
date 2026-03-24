@@ -521,7 +521,7 @@ class BaseAgent:
         genome: AgentGenome,
         user_message: str,
         max_tokens: int = 4096,
-        timeout_ms: int = 120000,
+        timeout_ms: int = 300000,
     ) -> str:
         """
         Invoke Kimi (Moonshot) with the agent's current genome as system prompt.
@@ -597,7 +597,7 @@ class BaseAgent:
                     last_error = e
                     err_str = str(e)
                     if "429" in err_str or "overloaded" in err_str.lower() or "rate_limit" in err_str.lower():
-                        wait = (2 ** attempt) * 2 + 1  # 3s, 5s, 9s, 17s
+                        wait = (2 ** attempt) * 5 + 5  # 5s, 15s, 25s, 45s
                         print(f"[{self.agent_id}] Rate limited — retrying in {wait}s (attempt {attempt+1}/4)")
                         await asyncio.sleep(wait)
                         continue

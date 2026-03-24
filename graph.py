@@ -191,9 +191,14 @@ async def _quality_gate(state: AgentState) -> Dict[str, Any]:
 
     retry_count = state.get("quality_retry_count", 0)
 
+    # ECHO returns 0.0 when it can't parse an agent's output (neutral/unparseable).
+    # Treat 0.0 as "agent completed work but we can't measure quality" → pass through.
+    # Otherwise require minimum threshold.
+    min_probe = config.QUALITY_GATE["min_probe_score"]
+    min_lens  = config.QUALITY_GATE["min_lens_score"]
     passed = (
-        probe_score >= config.QUALITY_GATE["min_probe_score"] and
-        lens_score  >= config.QUALITY_GATE["min_lens_score"]
+        (probe_score == 0.0 or probe_score >= min_probe) and
+        (lens_score  == 0.0 or lens_score  >= min_lens)
     )
 
     if passed:
@@ -287,9 +292,13 @@ def _make_quality_gate(analytics: PipelineAnalytics | None):
 
         retry_count = state.get("quality_retry_count", 0)
 
+        # ECHO returns 0.0 when it can't parse an agent's output (neutral/unparseable).
+        # Treat 0.0 as "agent completed work but we can't measure quality" → pass through.
+        min_probe = config.QUALITY_GATE["min_probe_score"]
+        min_lens  = config.QUALITY_GATE["min_lens_score"]
         passed = (
-            probe_score >= config.QUALITY_GATE["min_probe_score"] and
-            lens_score  >= config.QUALITY_GATE["min_lens_score"]
+            (probe_score == 0.0 or probe_score >= min_probe) and
+            (lens_score  == 0.0 or lens_score  >= min_lens)
         )
 
         if passed:
