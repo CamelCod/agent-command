@@ -1022,3 +1022,9 @@ async def dashboard():
 @app.get("/ping")
 async def ping():
     return {"status": "ok", "timestamp": datetime.utcnow().isoformat()}
+
+
+def run():
+    """CLI entry point: `agent-server`."""
+    import uvicorn
+    uvicorn.run("api_server:app", host="0.0.0.0", port=8765, reload=False)
