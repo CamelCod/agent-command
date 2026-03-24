@@ -15,7 +15,7 @@ import re
 import base64
 import secrets
 import urllib.parse
-from datetime import datetime
+from datetime import datetime, timedelta
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, BackgroundTasks, HTTPException, Request, status
 from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse, RedirectResponse
@@ -55,7 +55,16 @@ async def lifespan(app: FastAPI):
 # ─────────────────────────────────────────────────────────────────
 
 app = FastAPI(title="Agent Command Dashboard", version="1.0.0", lifespan=lifespan)
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+_ALLOWED_ORIGINS = [
+    os.getenv("ALLOWED_ORIGIN", "http://localhost:8765"),
+]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_ALLOWED_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["*"],
+)
 
 jobs: dict = {}
 
@@ -70,6 +79,21 @@ class BuildRequest(BaseModel):
 # ─────────────────────────────────────────────────────────────────
 # Internal job runner with real-time event tracking
 # ─────────────────────────────────────────────────────────────────
+
+def _evict_stale_jobs():
+    """Remove completed/error jobs older than 24 hours to prevent unbounded growth."""
+    cutoff = datetime.utcnow() - timedelta(hours=24)
+    for job_id in list(jobs.keys()):
+        job = jobs[job_id]
+        completed_at = job.get("completed_at")
+        if completed_at:
+            try:
+                completed_time = datetime.fromisoformat(completed_at)
+                if completed_time < cutoff:
+                    del jobs[job_id]
+            except Exception:
+                pass
+
 
 def job_event(job_id: str, event_type: str, data: dict):
     """Write an event to the job's event stream."""
@@ -123,6 +147,7 @@ async def _run_build_job(job_id: str, intent: str, needs_ai: bool):
 
 @app.post("/build")
 async def trigger_build(req: BuildRequest, background_tasks: BackgroundTasks):
+    _evict_stale_jobs()  # Purge stale jobs before adding a new one
     job_id = str(uuid.uuid4())[:8]
     jobs[job_id] = {
         "status": "queued",
@@ -316,8 +341,16 @@ async def check_premium_status(request: Request) -> bool:
             if resp.status_code == 200:
                 data = resp.json()
                 is_premium = bool(data.get("premium", False))
-        except Exception:
-            pass  # Fail open on premium check errors — don't block the request
+        except Exception as exc:
+            # Fail open on premium check errors — don't block the request.
+            # Log for observability so we can detect billing-system outages.
+            import logging
+            logging.warning(
+                "[check_premium_status] Premium check failed for session=%s — %s: %s. Falling back to is_premium=False.",
+                request.state._session.get("github_username", "unknown"),
+                type(exc).__name__,
+                str(exc),
+            )
 
     # Update session
     request.state._session["is_premium"] = is_premium
@@ -337,7 +370,7 @@ def _load_session(request: Request) -> dict:
     if not cookie_value:
         return {}
     try:
-        signer = itsdangerous.Signer(_get_session_secret())
+        signer = itsdangerous.Signer(_get_session_secret(), salt="agentcraft-prod")
         if not signer.unsign(cookie_value):
             return {}
         import urllib.parse
@@ -401,7 +434,7 @@ class GithubExportRequest(BaseModel):
 #
 # Streaming:
 #   When stream=True, Moonshot returns text/event-stream (SSE).
-#   We relay it byte-for-byte as application/x-ndjson so the frontend
+#   We relay it byte-for-byte as text/event-stream so the frontend
 #   fetch can read it with response.body.getReader() — no buffering,
 #   no added latency beyond the network hop to Moonshot.
 # ─────────────────────────────────────────────────────────────────
@@ -419,11 +452,25 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
             detail="MOONSHOT_API_KEY is not configured on the server.",
         )
 
+    # SSRF prevention: only allow known-good Moonshot endpoints
+    _ALLOWED_UPSTREAMS = [
+        "https://api.moonshot.cn",
+        "https://api.moonshot.cn/v1",
+        "https://api.moonshot.com",
+        "https://api.moonshot.com/v1",
+    ]
     base_url = os.getenv("MOONSHOT_BASE_URL", "https://api.moonshot.cn/v1")
+    if base_url not in _ALLOWED_UPSTREAMS:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Invalid MOONSHOT_BASE_URL — upstream not in allowlist.",
+        )
 
     async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=15.0)) as client:
         try:
             payload = req.model_dump(exclude_none=True)
+            # Resource guard: cap max_tokens to prevent runaway API bills
+            payload["max_tokens"] = min(payload.get("max_tokens", 4000), 8000)
             headers = {
                 "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json",
@@ -446,7 +493,7 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
 
                 return StreamingResponse(
                     stream_generator(),
-                    media_type="application/x-ndjson",
+                    media_type="text/event-stream",
                     headers={
                         "Cache-Control": "no-cache",
                         "X-Accel-Buffering": "no",  # Disable nginx buffering
@@ -494,7 +541,7 @@ def _set_session_cookie(session: dict, response, https_only: bool) -> None:
     Sign a session dict and set it as the agentcraft_session cookie.
     """
     cookie_data = urllib.parse.urlencode({**session})
-    signer = itsdangerous.Signer(_get_session_secret())
+    signer = itsdangerous.Signer(_get_session_secret(), salt="agentcraft-prod")
     signed = signer.sign(cookie_data.encode())
     response.set_cookie(
         key="agentcraft_session",
@@ -525,7 +572,7 @@ async def github_oauth_start(request: Request):
 
     # Build the session with the state, then set the cookie before redirect
     session = dict(request.state._session or {})
-    session["oauth_state"] = oauth_state
+    session.setdefault("oauth_states", []).append(oauth_state)
 
     github_url = (
         f"https://github.com/login/oauth/authorize"
@@ -552,13 +599,17 @@ async def github_oauth_callback(request: Request, code: str = "", error: str = "
         response = RedirectResponse(url="/?github_error=cancelled", status_code=302)
         # Still set/clear session on cancel
         session = dict(request.state._session or {})
-        session.pop("oauth_state", None)
+        oauth_states = session.pop("oauth_states", [])
+        if state and state in oauth_states:
+            oauth_states.remove(state)
+        if oauth_states:
+            session["oauth_states"] = oauth_states
         _set_session_cookie(session, response, https_only=https_only)
         return response
 
-    # ── CSRF state validation — strict equality check ─────────────────────
-    stored_state = request.state._session.get("oauth_state") if request.state._session else None
-    if not stored_state or stored_state != state:
+    # ── CSRF state validation — strict equality check against state list ────
+    oauth_states = request.state._session.get("oauth_states", []) if request.state._session else []
+    if state not in oauth_states:
         response = RedirectResponse(url="/?github_error=csrf", status_code=302)
         return response
 
@@ -602,13 +653,24 @@ async def github_oauth_callback(request: Request, code: str = "", error: str = "
         )
         if user_resp.status_code == 200:
             username = user_resp.json().get("login", username)
+        else:
+            import logging
+            logging.warning(
+                "[github_oauth_callback] GitHub username lookup failed — status=%s, token_prefix=%s",
+                user_resp.status_code,
+                access_token[:4] if access_token else "None",
+            )
 
     # Build updated session: store GitHub token, clear CSRF state
     session = dict(request.state._session or {})
     session["github_access_token"] = access_token
     session["github_username"] = username
     session["is_premium"] = session.get("is_premium", False)
-    session.pop("oauth_state", None)  # Clear state after successful use (one-time)
+    oauth_states = session.pop("oauth_states", [])
+    if state and state in oauth_states:
+        oauth_states.remove(state)
+    if oauth_states:
+        session["oauth_states"] = oauth_states
 
     # Redirect to the app root after successful auth — frontend polls /v1/user/session
     response = RedirectResponse(url="/?github_connected=1", status_code=302)
@@ -645,6 +707,14 @@ async def github_export(req: GithubExportRequest, request: Request):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="GitHub not connected. Use GET /v1/auth/github to authorize first.",
+        )
+
+    # Resource guard: reject oversized payloads before they reach GitHub's API
+    MAX_EXPORT_SIZE = 1_000_000  # 1 MB
+    if len(req.html_content) > MAX_EXPORT_SIZE:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"html_content exceeds maximum size of {MAX_EXPORT_SIZE} bytes.",
         )
 
     username = request.state.github_username or "user"

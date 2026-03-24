@@ -913,11 +913,10 @@ async function exportToGithub() {
     });
 
     if (resp.status === 401) {
-      // Token expired or revoked — re-authenticate
+      // Token expired or revoked — re-authenticate via redirect
       STATE.githubConnected = false;
       appendBuildLog('GITHUB', 'Session expired. Reconnecting to GitHub...', 'error');
-      const { authorize_url } = await fetch('/v1/auth/github').then(r => r.json());
-      window.location.href = authorize_url;
+      window.location.href = '/v1/auth/github';
       return;
     }
 
@@ -940,21 +939,6 @@ async function exportToGithub() {
 function getProjectSlug() {
   const name = DOM.projectName.value || 'frontend';
   return name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
-}
-
-/**
- * Get the authenticated GitHub username.
- * @returns {Promise<string>}
- */
-async function getGithubUsername() {
-  try {
-    const { exec } = await import('node:child_process');
-    return new Promise((resolve) => {
-      exec('gh api user --jq .login', (err, stdout) => {
-        resolve(err ? 'user' : stdout.trim());
-      });
-    });
-  } catch { return 'user'; }
 }
 
 /**
