@@ -1,6 +1,6 @@
 [build-system]
-requires = ["hatchling", "hatch-vcs"]
-build-backend = "hatchling.build"
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "agent-command"
@@ -16,9 +16,7 @@ keywords = ["ai", "agents", "langgraph", "llm", "software-development", "autonom
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3.12",
-    "Programming Language :: Python :: 3.13",
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 dependencies = [
@@ -52,3 +50,9 @@ agent-server = "api_server:run"
 [project.urls]
 Homepage = "https://github.com/CamelCod/agent-command"
 Repository = "https://github.com/CamelCod/agent-command"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["agents*", "heart*"]
+exclude = ["tests*"]
+
