@@ -53,6 +53,11 @@ Repository = "https://github.com/CamelCod/agent-command"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["agents*", "heart*"]
+include = ["agents*", "heart*", "frontend*"]
 exclude = ["tests*"]
+
+[tool.setuptools.package-data]
+agents = ["py.typed"]
+heart = ["py.typed"]
+frontend = ["*"]
 

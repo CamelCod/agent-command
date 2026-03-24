@@ -20,6 +20,8 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, BackgroundTasks, HTTPException, Request, status
 from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from pathlib import Path
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 import httpx
@@ -65,6 +67,14 @@ app.add_middleware(
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
+
+# ─────────────────────────────────────────────────────────────────
+# Frontend static files — serve at /ui
+# ─────────────────────────────────────────────────────────────────
+
+_frontend_path = Path(__file__).parent / "frontend"
+if _frontend_path.exists():
+    app.mount("/ui", StaticFiles(directory=str(_frontend_path), html=True), name="frontend")
 
 jobs: dict = {}
 

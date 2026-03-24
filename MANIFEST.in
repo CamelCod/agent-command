@@ -1,0 +1,4 @@
+include frontend/*
+include pyproject.toml
+include README.md
+include .gitignore
