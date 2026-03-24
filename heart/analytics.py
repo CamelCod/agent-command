@@ -80,7 +80,7 @@ class PipelineAnalytics:
                     "source": "agent_command",
                 }],
             )
-        except Exception as e:
+        except httpx.HTTPError as e:
             print(f"[ANALYTICS] Langfuse score submission failed: {e}")
 
     async def emit_agent_completed(
@@ -114,7 +114,7 @@ class PipelineAnalytics:
             }
             event["assessment"] = echo_report.get("assessment", "")
 
-        self._emit_jsonl(event)
+        await self._emit_jsonl(event)
         print(
             f"[ANALYTICS] {agent_id} | score: {score:.1f} | {duration_ms}ms"
         )
@@ -131,7 +131,7 @@ class PipelineAnalytics:
     #  Phase Transitions
     # ─────────────────────────────────────────────────────────────────────────
 
-    def start_phase(self, phase_name: str):
+    async def start_phase(self, phase_name: str):
         """Mark when a phase starts."""
         self._phase_starts[phase_name] = time.time()
         event = {
@@ -139,10 +139,10 @@ class PipelineAnalytics:
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "phase": phase_name,
         }
-        self._emit_jsonl(event)
+        await self._emit_jsonl(event)
         print(f"[ANALYTICS] Phase started: {phase_name}")
 
-    def end_phase(self, phase_name: str, agents: list[str]):
+    async def end_phase(self, phase_name: str, agents: list[str]):
         """Mark when a phase ends and emit summary."""
         if phase_name not in self._phase_starts:
             return
@@ -155,7 +155,7 @@ class PipelineAnalytics:
             "agents": agents,
             "duration_seconds": round(duration_s, 1),
         }
-        self._emit_jsonl(event)
+        await self._emit_jsonl(event)
         print(
             f"[ANALYTICS] Phase completed: {phase_name} | {duration_s:.0f}s | agents: {', '.join(agents)}"
         )
@@ -184,7 +184,7 @@ class PipelineAnalytics:
             "passed": passed,
             "retry_count": retry_count,
         }
-        self._emit_jsonl(event)
+        await self._emit_jsonl(event)
 
         status = "✅ PASS" if passed else "❌ FAIL"
         print(
@@ -224,7 +224,7 @@ class PipelineAnalytics:
             "fitness_after": fitness_after,
             "accepted": accepted,
         }
-        self._emit_jsonl(event)
+        await self._emit_jsonl(event)
 
         delta = f"+{fitness_after - fitness_before:.2f}" if fitness_after else "?"
         status = "✓ accepted" if accepted else "✗ rejected"
@@ -237,7 +237,7 @@ class PipelineAnalytics:
     #  Build Summary
     # ─────────────────────────────────────────────────────────────────────────
 
-    def start_build(self, project_id: str, intent: str):
+    async def start_build(self, project_id: str, intent: str):
         """Mark build start."""
         self._build_start = time.time()
         event = {
@@ -246,10 +246,10 @@ class PipelineAnalytics:
             "project_id": project_id,
             "intent": intent[:100],
         }
-        self._emit_jsonl(event)
+        await self._emit_jsonl(event)
         print(f"[ANALYTICS] Build started: {project_id}")
 
-    def end_build(
+    async def end_build(
         self,
         project_id: str,
         passed: bool,
@@ -273,7 +273,7 @@ class PipelineAnalytics:
             "evolution_count": evolution_count,
             "deliverables": deliverables,
         }
-        self._emit_jsonl(event)
+        await self._emit_jsonl(event)
 
         status = "✅ PASS" if passed else ("⚠️ ESCALATED" if escalation else "❌ FAIL")
         print(
@@ -286,13 +286,18 @@ class PipelineAnalytics:
     #  JSONL helper
     # ─────────────────────────────────────────────────────────────────────────
 
-    def _emit_jsonl(self, event: dict):
-        """Append event to JSONL file."""
+    async def _emit_jsonl(self, event: dict):
+        """Append event to JSONL file (non-blocking)."""
         try:
-            with open(self.events_path, "a") as f:
-                f.write(json.dumps(event) + "\n")
+            content = json.dumps(event) + "\n"
+            await asyncio.to_thread(self._write_jsonl, self.events_path, content)
         except Exception as e:
             print(f"[ANALYTICS] JSONL write failed: {e}")
+
+    def _write_jsonl(self, path: Path, content: str):
+        """Blocking file write helper (runs in thread pool)."""
+        with open(path, "a") as f:
+            f.write(content)
 
     # ─────────────────────────────────────────────────────────────────────────
     #  Cleanup

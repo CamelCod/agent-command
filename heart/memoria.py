@@ -15,7 +15,6 @@ from __future__ import annotations
 import json
 import uuid
 import aiosqlite
-from datetime import datetime
 from typing import List, Optional, Dict, Any
 
 from state import AgentGenome, EchoReport, EvolutionRecord
@@ -38,7 +37,17 @@ class Memoria:
     # ── Lifecycle ────────────────────────────────────────────────────────────
 
     async def initialize(self):
-        """Create tables if they don't exist. Call once at startup."""
+        # -------------------------------------------------------
+        # FUNCTION: initialize
+        # GOAL:     Create all MEMORIA tables if they don't exist.
+        # INPUT:    None
+        # OUTPUT:   None — creates tables and indexes in SQLite.
+        # STEPS:
+        #   1. Connect to SQLite database.
+        #   2. Execute DDL for agent_genomes, echo_reports, evolution_records.
+        #   3. Create indexes on agent_id and project_id for performance.
+        #   4. Commit and close connection.
+        # -------------------------------------------------------
         async with aiosqlite.connect(self.db_path) as db:
             await db.executescript("""
                 -- Agent genomes: the evolving DNA of each agent
@@ -66,7 +75,7 @@ class Memoria:
                     project_id    TEXT NOT NULL,
                     score_quality        REAL NOT NULL,
                     score_completeness   REAL NOT NULL,
-                    score_contract       REAL NOT NULL,
+                    score_contract_adherence REAL NOT NULL,
                     score_efficiency     REAL NOT NULL,
                     score_innovation     REAL NOT NULL,
                     composite_score      REAL NOT NULL,
@@ -82,7 +91,7 @@ class Memoria:
                     agent_id        TEXT NOT NULL,
                     from_version    INTEGER NOT NULL,
                     to_version      INTEGER NOT NULL,
-                    trigger_reason  TEXT,
+                    trigger         TEXT,
                     weak_dimensions TEXT,   -- JSON array
                     fitness_before  REAL,
                     fitness_after   REAL,
@@ -101,7 +110,16 @@ class Memoria:
     # ── Genome Operations ────────────────────────────────────────────────────
 
     async def save_genome(self, genome: AgentGenome):
-        """Persist a new genome version."""
+        # -------------------------------------------------------
+        # FUNCTION: save_genome
+        # GOAL:     Persist a new genome version for an agent.
+        # INPUT:    genome (AgentGenome) — the genome to persist
+        # OUTPUT:   None — writes to SQLite agent_genomes table.
+        # STEPS:
+        #   1. Deactivate any currently active genome for this agent.
+        #   2. Insert the new genome as the active version.
+        #   3. Commit transaction.
+        # -------------------------------------------------------
         async with aiosqlite.connect(self.db_path) as db:
             # Deactivate old active genome for this agent
             await db.execute(
@@ -130,7 +148,16 @@ class Memoria:
             await db.commit()
 
     async def get_active_genome(self, agent_id: str) -> Optional[AgentGenome]:
-        """Get the current active genome for an agent."""
+        # -------------------------------------------------------
+        # FUNCTION: get_active_genome
+        # GOAL:     Retrieve the currently active genome for an agent.
+        # INPUT:    agent_id (str)
+        # OUTPUT:   Returns AgentGenome or None if no active genome exists.
+        # STEPS:
+        #   1. Query agent_genomes where agent_id matches and is_active=1.
+        #   2. Fetch one row and map to AgentGenome TypedDict.
+        #   3. Return None if no row found.
+        # -------------------------------------------------------
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(
@@ -154,7 +181,16 @@ class Memoria:
                 )
 
     async def get_genome_history(self, agent_id: str, limit: int = 10) -> List[AgentGenome]:
-        """Get all genome versions for an agent, newest first."""
+        # -------------------------------------------------------
+        # FUNCTION: get_genome_history
+        # GOAL:     Retrieve all past genome versions for an agent.
+        # INPUT:    agent_id (str), limit (int) — max versions to return
+        # OUTPUT:   Returns List[AgentGenome], newest first.
+        # STEPS:
+        #   1. Query agent_genomes ordered by version DESC.
+        #   2. Apply LIMIT to restrict results.
+        #   3. Map each row to AgentGenome TypedDict.
+        # -------------------------------------------------------
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(
@@ -181,12 +217,20 @@ class Memoria:
     # ── Echo Report Operations ───────────────────────────────────────────────
 
     async def save_echo_report(self, report: EchoReport):
-        """Persist a new ECHO scoring report."""
+        # -------------------------------------------------------
+        # FUNCTION: save_echo_report
+        # GOAL:     Persist a completed ECHO scoring report to SQLite.
+        # INPUT:    report (EchoReport) — the report to save
+        # OUTPUT:   None — writes to echo_reports table.
+        # STEPS:
+        #   1. INSERT OR REPLACE into echo_reports with all fields.
+        #   2. Commit transaction.
+        # -------------------------------------------------------
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute("""
                 INSERT OR REPLACE INTO echo_reports
                 (run_id, agent_id, genome_version, project_id,
-                 score_quality, score_completeness, score_contract,
+                 score_quality, score_completeness, score_contract_adherence,
                  score_efficiency, score_innovation, composite_score,
                  assessment, suggestions, duration_ms, timestamp)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -209,7 +253,16 @@ class Memoria:
             await db.commit()
 
     async def get_recent_reports(self, agent_id: str, limit: int = 20) -> List[EchoReport]:
-        """Get the N most recent ECHO reports for an agent."""
+        # -------------------------------------------------------
+        # FUNCTION: get_recent_reports
+        # GOAL:     Retrieve the most recent ECHO reports for an agent.
+        # INPUT:    agent_id (str), limit (int) — max reports to return
+        # OUTPUT:   Returns List[EchoReport], newest first.
+        # STEPS:
+        #   1. Query echo_reports filtered by agent_id, ordered by timestamp DESC.
+        #   2. Apply LIMIT.
+        #   3. Map each row to EchoReport TypedDict.
+        # -------------------------------------------------------
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(
@@ -226,7 +279,7 @@ class Memoria:
                         project_id=r["project_id"],
                         score_quality=r["score_quality"],
                         score_completeness=r["score_completeness"],
-                        score_contract_adherence=r["score_contract"],
+                        score_contract_adherence=r["score_contract_adherence"],
                         score_efficiency=r["score_efficiency"],
                         score_innovation=r["score_innovation"],
                         composite_score=r["composite_score"],
@@ -239,7 +292,16 @@ class Memoria:
                 ]
 
     async def get_agent_fitness(self, agent_id: str, last_n: int = 10) -> float:
-        """Compute rolling average fitness score for an agent."""
+        # -------------------------------------------------------
+        # FUNCTION: get_agent_fitness
+        # GOAL:     Compute the rolling average composite score for an agent.
+        # INPUT:    agent_id (str), last_n (int) — number of recent runs to average
+        # OUTPUT:   Returns float fitness score (0.0 to 10.0), defaults to 5.0.
+        # STEPS:
+        #   1. Query last N echo_reports for agent, ordered DESC.
+        #   2. Compute AVG(composite_score).
+        #   3. Return 5.0 if no reports found.
+        # -------------------------------------------------------
         async with aiosqlite.connect(self.db_path) as db:
             async with db.execute(
                 """SELECT AVG(composite_score) as avg_score FROM (
@@ -252,13 +314,22 @@ class Memoria:
                 return row[0] if row and row[0] is not None else 5.0
 
     async def get_weak_dimensions(self, agent_id: str, last_n: int = 10) -> Dict[str, float]:
-        """Get average score per dimension to identify what's dragging fitness down."""
+        # -------------------------------------------------------
+        # FUNCTION: get_weak_dimensions
+        # GOAL:     Identify which scoring dimensions are dragging an agent's fitness down.
+        # INPUT:    agent_id (str), last_n (int) — number of recent runs to analyse
+        # OUTPUT:   Returns Dict[str, float] mapping dimension name to average score.
+        # STEPS:
+        #   1. Query AVG of each score column over last N reports.
+        #   2. Return dict with keys: quality, completeness, contract_adherence,
+        #      efficiency, innovation. Missing/None maps to 5.0.
+        # -------------------------------------------------------
         async with aiosqlite.connect(self.db_path) as db:
             async with db.execute(
                 """SELECT
                        AVG(score_quality)      as quality,
                        AVG(score_completeness) as completeness,
-                       AVG(score_contract)     as contract_adherence,
+                       AVG(score_contract_adherence) as contract_adherence,
                        AVG(score_efficiency)   as efficiency,
                        AVG(score_innovation)   as innovation
                    FROM (
@@ -279,7 +350,12 @@ class Memoria:
                 }
 
     async def get_run_count(self, agent_id: str) -> int:
-        """Total number of times an agent has been invoked."""
+        # -------------------------------------------------------
+        # FUNCTION: get_run_count
+        # GOAL:     Count how many times an agent has been invoked.
+        # INPUT:    agent_id (str)
+        # OUTPUT:   Returns int count of echo_reports for this agent.
+        # -------------------------------------------------------
         async with aiosqlite.connect(self.db_path) as db:
             async with db.execute(
                 "SELECT COUNT(*) FROM echo_reports WHERE agent_id = ?",
@@ -291,12 +367,20 @@ class Memoria:
     # ── Evolution Record Operations ──────────────────────────────────────────
 
     async def save_evolution_record(self, record: EvolutionRecord):
-        """Persist a Darwin evolution event."""
+        # -------------------------------------------------------
+        # FUNCTION: save_evolution_record
+        # GOAL:     Persist a DARWIN evolution mutation event.
+        # INPUT:    record (EvolutionRecord) — the evolution event to save
+        # OUTPUT:   None — writes to evolution_records table.
+        # STEPS:
+        #   1. INSERT OR REPLACE into evolution_records with all fields.
+        #   2. Commit transaction.
+        # -------------------------------------------------------
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute("""
                 INSERT OR REPLACE INTO evolution_records
                 (evolution_id, agent_id, from_version, to_version,
-                 trigger_reason, weak_dimensions, fitness_before,
+                 trigger, weak_dimensions, fitness_before,
                  fitness_after, prompt_diff_summary, accepted, timestamp)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
@@ -315,7 +399,15 @@ class Memoria:
             await db.commit()
 
     async def get_evolution_history(self, agent_id: str) -> List[EvolutionRecord]:
-        """Get full evolution history for an agent."""
+        # -------------------------------------------------------
+        # FUNCTION: get_evolution_history
+        # GOAL:     Retrieve all evolution events for an agent.
+        # INPUT:    agent_id (str)
+        # OUTPUT:   Returns List[EvolutionRecord], newest first.
+        # STEPS:
+        #   1. Query evolution_records filtered by agent_id, ordered DESC.
+        #   2. Map each row to EvolutionRecord TypedDict.
+        # -------------------------------------------------------
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(
@@ -329,7 +421,7 @@ class Memoria:
                         agent_id=r["agent_id"],
                         from_version=r["from_version"],
                         to_version=r["to_version"],
-                        trigger=r["trigger_reason"],
+                        trigger=r["trigger"],
                         weak_dimensions=json.loads(r["weak_dimensions"] or "[]"),
                         fitness_before=r["fitness_before"],
                         fitness_after=r["fitness_after"],
@@ -343,7 +435,17 @@ class Memoria:
     # ── Dashboard Helpers ────────────────────────────────────────────────────
 
     async def get_team_health(self) -> Dict[str, Any]:
-        """Return a health snapshot of the entire agent team."""
+        # -------------------------------------------------------
+        # FUNCTION: get_team_health
+        # GOAL:     Build a health snapshot for the entire agent team.
+        # INPUT:    None
+        # OUTPUT:   Returns Dict[str, dict] keyed by agent_id with fitness, runs,
+        #           genome_version, generation, and model.
+        # STEPS:
+        #   1. Iterate over all known agent IDs from config.
+        #   2. For each agent, fetch fitness, run count, and active genome.
+        #   3. Return aggregated health dict.
+        # -------------------------------------------------------
         agents = list(config.AGENT_TIERS.keys())
         health = {}
         for agent_id in agents:

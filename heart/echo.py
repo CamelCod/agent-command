@@ -14,6 +14,7 @@ each agent completes, so the build pipeline is never slowed.
 """
 
 from __future__ import annotations
+import re
 import uuid
 import time
 import json
@@ -50,7 +51,7 @@ Score ONLY these 4 dimensions (0.0 to 10.0 each):
 3. quality — Is the HTML semantic? CSS clean? JS robust? Are forms, buttons, inputs functional?
 4. adherence — Does the output match the input specification?
 
-Provide EXACTLY this JSON (no other text):
+IMPORTANT: Output valid JSON only with these EXACT keys:
 {{"score_quality":0.0,"score_completeness":0.0,"score_contract_adherence":0.0,"score_efficiency":0.0,"score_innovation":0.0,"assessment":"...","improvement_suggestions":["...","..."]}}
 """,
 
@@ -229,10 +230,23 @@ class Echo:
         output_summary: str,
         duration_ms: int,
     ) -> EchoReport:
-        """
-        Score an agent's output. This is the core ECHO function.
-        Returns an EchoReport with dimensional scores and analysis.
-        """
+        # -------------------------------------------------------
+        # FUNCTION: score
+        # GOAL:     Score an agent's output across 5 dimensions using LLM judgment.
+        # INPUT:    agent_id (str), project_id (str), genome_version (int),
+        #           input_summary (str), output_summary (str), duration_ms (int)
+        # OUTPUT:   Returns EchoReport with dimensional scores and analysis.
+        # STEPS:
+        #   1. Determine tier and weight set for the agent.
+        #   2. Select agent-specific or generic scoring template.
+        #   3. Call LLM to produce JSON scores (3-strategy parsing).
+        #   4. Fall back to neutral 5.0 scores if all parsing fails.
+        #   5. Compute weighted composite from dimensional scores.
+        #   6. Persist EchoReport to MEMORIA.
+        #   7. Update genome fitness via exponential moving average.
+        #   8. Return the EchoReport.
+        # -------------------------------------------------------
+        tier = config.AGENT_TIERS.get(agent_id, "T2")
         tier = config.AGENT_TIERS.get(agent_id, "T2")
         weights = config.ECHO_SCORING["tier_weights"][tier]
         agent_role = AGENT_ROLES.get(agent_id, "Specialized AI agent")
@@ -265,7 +279,6 @@ class Echo:
 
             content = response.choices[0].message.content or ""
             reasoning = response.choices[0].message.reasoning_content or ""
-            import re
 
             raw = None
             parsed_scores = None
@@ -288,12 +301,14 @@ class Echo:
             found = False
             for field in ["score_quality", "score_completeness", "score_contract_adherence",
                           "score_efficiency", "score_innovation"]:
-                # Try multiple patterns: quoted JSON, plain text, with/without quotes
+                # Try multiple patterns: quoted JSON, plain text, with/without quotes, with labels
                 patterns = [
-                    rf'"{field}"\s*:\s*([0-9.]+)',
-                    rf"'{field}'\s*:\s*([0-9.]+)",
-                    rf'{field}\s*:\s*([0-9.]+)',
-                    rf'{field}[^0-9]*([0-9.]+)',
+                    rf'"{field}"\s*:\s*([0-9.]+)',       # "score_quality": 8.0
+                    rf"'{field}'\s*:\s*([0-9.]+)",        # 'score_quality': 8.0
+                    rf'{field}\s*:\s*([0-9.]+)',           # score_quality: 8.0
+                    rf'"{field}"\s*:\s*(\d+(?:\.\d+)?)', # "score_quality": 8
+                    rf'{field}[^:]*:\s*([0-9.]+)',        # score_quality ... : 8.0
+                    rf'{field.lower()}\s*:\s*([0-9.]+)',   # case insensitive
                 ]
                 for pat in patterns:
                     m = re.search(pat, text, re.IGNORECASE)
@@ -394,7 +409,17 @@ class Echo:
         genome_version: int,
         new_score: float
     ):
-        """Update the rolling fitness score for the active genome."""
+        # -------------------------------------------------------
+        # FUNCTION: _update_genome_fitness
+        # GOAL:     Update the rolling fitness score for an agent's active genome.
+        # INPUT:    agent_id (str), genome_version (int), new_score (float)
+        # OUTPUT:   None — persists updated fitness to MEMORIA.
+        # STEPS:
+        #   1. Retrieve current rolling fitness from MEMORIA.
+        #   2. Apply exponential moving average: 70% old + 30% new.
+        #   3. Retrieve the active genome from MEMORIA.
+        #   4. Update genome fitness_score and save back to MEMORIA.
+        # -------------------------------------------------------
         current_fitness = await self.memoria.get_agent_fitness(agent_id)
         # Exponential moving average — new data has more weight
         updated_fitness = (current_fitness * 0.7) + (new_score * 0.3)
@@ -406,7 +431,17 @@ class Echo:
             await self.memoria.save_genome(genome)
 
     def format_input_summary(self, state: AgentState, agent_id: str) -> str:
-        """Extract a concise input summary from state for a specific agent."""
+        # -------------------------------------------------------
+        # FUNCTION: format_input_summary
+        # GOAL:     Extract a concise, agent-specific input summary from state.
+        # INPUT:    state (AgentState), agent_id (str)
+        # OUTPUT:   Returns a formatted string summarising the agent's input context.
+        # STEPS:
+        #   1. Start with human intent as base context.
+        #   2. Append agent-specific slices based on agent_id.
+        #   3. Truncate each slice to prevent prompt bloat.
+        #   4. Join and return as a single newline-delimited string.
+        # -------------------------------------------------------
         parts = [f"Human Intent: {state.get('human_intent', 'N/A')}"]
 
         if agent_id == "PRISM":

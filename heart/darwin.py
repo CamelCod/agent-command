@@ -172,10 +172,16 @@ class Darwin:
         return records
 
     async def evolve_agents(self, agent_ids: List[str]) -> List[EvolutionRecord]:
-        """
-        Run targeted evolution on specific agents only.
-        Useful for focusing improvement efforts on underperforming agents.
-        """
+        # -------------------------------------------------------
+        # FUNCTION: evolve_agents
+        # GOAL:     Run targeted DARWIN evolution on a specific list of agents.
+        # INPUT:    agent_ids (List[str]) — agent IDs to evolve
+        # OUTPUT:   Returns List[EvolutionRecord] for evolved agents.
+        # STEPS:
+        #   1. Validate each agent_id against known agent tiers.
+        #   2. Call _evolve() for each valid agent.
+        #   3. Collect and return all evolution records.
+        # -------------------------------------------------------
         records = []
         for agent_id in agent_ids:
             if agent_id not in config.AGENT_TIERS:
