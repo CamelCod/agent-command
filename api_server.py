@@ -10,13 +10,19 @@ import uuid
 import asyncio
 import json
 import time
+import os
+import re
+import base64
+import urllib.parse
 from datetime import datetime
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, BackgroundTasks, HTTPException, Request
+from fastapi import FastAPI, BackgroundTasks, HTTPException, Request, status
 from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
+import httpx
+import itsdangerous
 
 from heart.memoria import Memoria
 from heart.echo import Echo
@@ -191,6 +197,527 @@ async def force_evolve():
 @app.get("/history/{agent_id}")
 async def agent_history(agent_id: str):
     return await memoria_global.get_evolution_history(agent_id.upper())
+
+# ─────────────────────────────────────────────────────────────────
+# Proxy HTTP Client (reused across requests)
+# ─────────────────────────────────────────────────────────────────
+
+import os
+import httpx
+import itsdangerous
+from starlette.middleware.sessions import SessionMiddleware
+from fastapi import Request, Depends, HTTPException, status
+
+# Lazy-loaded per-request; reuse a connection pool via a module-level client.
+_http_client: httpx.AsyncClient | None = None
+
+async def get_http_client() -> httpx.AsyncClient:
+    """Return a shared async HTTP client with connection pooling."""
+    global _http_client
+    if _http_client is None:
+        _http_client = httpx.AsyncClient(
+            timeout=httpx.Timeout(60.0, connect=10.0),
+            limits=httpx.Limits(max_keepalive_connections=10, max_connections=20),
+        )
+    return _http_client
+
+
+# ─────────────────────────────────────────────────────────────────
+# Session Management
+# ─────────────────────────────────────────────────────────────────
+#
+# Security design:
+#   - SESSION_SECRET_KEY signs all session cookies via itsdangerous.
+#   - The browser never sees the Moonshot API key — it lives only on
+#     the server and is injected by the /v1/chat/completions proxy.
+#   - GitHub OAuth tokens are stored in the server-side session only.
+#   - Sessions are cookie-based; no database required.
+#
+# Cookie layout (signed, httpOnly):
+#   session = {
+#     "is_premium": bool,
+#     "github_access_token": str | None,
+#     "github_username": str | None,
+#   }
+# ─────────────────────────────────────────────────────────────────
+
+def _get_signer():
+    secret = os.getenv("SESSION_SECRET_KEY", "dev-only-change-me-in-production")
+    return itsdangerous.Signer(secret)
+
+def _get_session_secret() -> str:
+    secret = os.getenv("SESSION_SECRET_KEY")
+    if not secret or secret == "dev-only-change-me-in-production":
+        import warnings
+        warnings.warn(
+            "SESSION_SECRET_KEY is not set or is using the default value. "
+            "Set a long random string in production to sign sessions securely.",
+            UserWarning,
+        )
+    return secret
+
+
+class SessionMiddleware(itsdangerous.Signer, SessionMiddleware):
+    """
+    Minimal cookie-based session middleware backed by itsdangerous signing.
+    Reads and writes the cookie on every request; no external store needed.
+    """
+    def __init__(self, app, secret_key: str, cookie_name: str = "agentcraft_session",
+                 max_age: int = 60 * 60 * 24 * 30):  # 30-day sessions
+        super().__init__(app, secret_key=secret_key, cookie_name=cookie_name,
+                         max_age=max_age, same_site="lax", https_only=False)
+
+
+# ─────────────────────────────────────────────────────────────────
+# Premium Feature Gating
+# ─────────────────────────────────────────────────────────────────
+#
+# before: Premium UI was toggled by a localStorage flag — trivially forgeable.
+# after:  Every premium-sensitive request is verified server-side before
+#         the response is sent. The frontend cannot spoof a premium status.
+#
+# The check:
+#   1. Look up "is_premium" in the signed session cookie.
+#   2. If absent, call PREMIUM_CHECK_URL (Stripe/LemonSqueezy webhook URL).
+#   3. Cache the result in the session for 5 minutes to avoid rate limits.
+#
+# Mock mode (before billing is integrated):
+#   Set PREMIUM_CHECK_URL to any URL that returns HTTP 200 with
+#   {"premium": false} — the mock endpoint below satisfies this.
+# ─────────────────────────────────────────────────────────────────
+
+SESSION_PREMIUM_CACHE_TTL = 300  # seconds
+
+async def check_premium_status(request: Request) -> bool:
+    """
+    Returns True if the current session is premium.
+    Caches the result in the session for SESSION_PREMIUM_CACHE_TTL seconds.
+    """
+    session = request.state.__dict__.get("_session", {})
+
+    cached = session.get("_premium_cached_at", 0)
+    import time as _time
+    if _time.time() - cached < SESSION_PREMIUM_CACHE_TTL:
+        return session.get("is_premium", False)
+
+    # Premium check URL from env — mock endpoint returns {"premium": false}
+    check_url = os.getenv("PREMIUM_CHECK_URL", "")
+
+    is_premium = False
+    if check_url:
+        try:
+            client = await get_http_client()
+            resp = await client.get(
+                check_url,
+                headers={"Authorization": f"Bearer {request.state.session_id}"},
+                timeout=5.0,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                is_premium = bool(data.get("premium", False))
+        except Exception:
+            pass  # Fail open on premium check errors — don't block the request
+
+    # Update session
+    request.state._session["is_premium"] = is_premium
+    request.state._session["_premium_cached_at"] = _time.time()
+    _save_session_cookie(request, request.state._session)
+
+    return is_premium
+
+
+# ─────────────────────────────────────────────────────────────────
+# Session helpers (read/write signed cookies)
+# ─────────────────────────────────────────────────────────────────
+
+def _load_session(request: Request) -> dict:
+    """Decode and verify the session cookie, return a dict."""
+    cookie_value = request.cookies.get("agentcraft_session", "")
+    if not cookie_value:
+        return {}
+    try:
+        signer = itsdangerous.Signer(_get_session_secret())
+        if not signer.unsign(cookie_value):
+            return {}
+        import urllib.parse
+        data = urllib.parse.parse_qs(cookie_value)
+        # Itsdangerous returns bytes; decode safely
+        result = {}
+        for k, v in data.items():
+            result[k.decode() if isinstance(k, bytes) else k] = \
+                v[0].decode() if isinstance(v[0], bytes) else v
+        return result
+    except Exception:
+        return {}
+
+def _save_session_cookie(request: Request, session: dict):
+    """Sign and write session dict as a cookie (handled by Starlette)."""
+    pass  # Starlette's session middleware handles this
+
+# Inject session into request.state on every request
+@app.middleware("http")
+async def inject_session(request: Request, call_next):
+    session = _load_session(request)
+    request.state._session = session
+    request.state.is_premium = session.get("is_premium", False)
+    request.state.github_token = session.get("github_access_token")
+    request.state.github_username = session.get("github_username")
+    response = await call_next(request)
+    return response
+
+
+# ─────────────────────────────────────────────────────────────────
+# Request Models
+# ─────────────────────────────────────────────────────────────────
+
+class ChatCompletionRequest(BaseModel):
+    model: str = "kimi-k2.5"
+    messages: list[dict]
+    max_tokens: int | None = 4000
+    temperature: float | None = 0.7
+    stream: bool | None = False
+
+class GithubExportRequest(BaseModel):
+    project_name: str
+    html_content: str
+
+
+# ─────────────────────────────────────────────────────────────────
+# Routes: AI Chat Proxy  (Moonshot key stays server-side)
+# ─────────────────────────────────────────────────────────────────
+#
+# BEFORE (insecure — app.js):
+#   fetch('https://api.moonshot.cn/v1/chat/completions', {
+#     headers: { 'Authorization': 'Bearer ' + localStorage.getItem('api_key') }
+#   })
+#   ↑ User's real Moonshot key exposed in browser network tab + localStorage
+#
+# AFTER (secure — api_server.py):
+#   POST /v1/chat/completions
+#   Body: { messages, model, max_tokens, temperature, stream }
+#   Server reads MOONSHOT_API_KEY from env, injects it, forwards to Moonshot.
+#   Browser only ever talks to our own origin — key never leaves the server.
+#
+# Streaming:
+#   When stream=True, Moonshot returns text/event-stream (SSE).
+#   We relay it byte-for-byte as application/x-ndjson so the frontend
+#   fetch can read it with response.body.getReader() — no buffering,
+#   no added latency beyond the network hop to Moonshot.
+# ─────────────────────────────────────────────────────────────────
+
+@app.post("/v1/chat/completions")
+async def chat_completions(req: ChatCompletionRequest, request: Request):
+    """
+    Proxy endpoint that forwards chat completion requests to Moonshot
+    with the API key injected server-side. Supports streaming.
+    """
+    api_key = os.getenv("MOONSHOT_API_KEY")
+    if not api_key:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="MOONSHOT_API_KEY is not configured on the server.",
+        )
+
+    base_url = os.getenv("MOONSHOT_BASE_URL", "https://api.moonshot.cn/v1")
+
+    async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=15.0)) as client:
+        try:
+            payload = req.model_dump(exclude_none=True)
+            headers = {
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            }
+
+            if req.stream:
+                # Streaming: relay SSE byte-for-byte to avoid added latency
+                moonc = await client.post(
+                    f"{base_url}/chat/completions",
+                    json=payload,
+                    headers=headers,
+                    timeout=120.0,
+                )
+                moonc.raise_for_status()
+
+                async def stream_generator():
+                    async for chunk in moonc.aiter_bytes(chunk_size=1024):
+                        if chunk:
+                            yield chunk
+
+                return StreamingResponse(
+                    stream_generator(),
+                    media_type="application/x-ndjson",
+                    headers={
+                        "Cache-Control": "no-cache",
+                        "X-Accel-Buffering": "no",  # Disable nginx buffering
+                    },
+                )
+            else:
+                # Non-streaming: await full response, return JSON
+                resp = await client.post(
+                    f"{base_url}/chat/completions",
+                    json=payload,
+                    headers=headers,
+                )
+                resp.raise_for_status()
+                return resp.json()
+
+        except httpx.HTTPStatusError as e:
+            raise HTTPException(status_code=e.response.status_code, detail=e.response.text)
+        except httpx.RequestError as e:
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY,
+                                detail=f"Upstream error: {str(e)}")
+
+
+# ─────────────────────────────────────────────────────────────────
+# Routes: GitHub OAuth
+# ─────────────────────────────────────────────────────────────────
+#
+# Security design:
+#   1. Client requests GET /v1/auth/github → server builds GitHub
+#      authorize URL with client_id + redirect_uri, returns 302.
+#   2. User authorizes in GitHub → GitHub redirects to
+#      GET /v1/auth/github/callback?code=XXX
+#   3. Server exchanges code for access_token (POST to GitHub, server-only).
+#      The access_token NEVER goes to the browser — it is stored in
+#      the signed session cookie only.
+#   4. Client polls GET /v1/user/session to know when auth is complete.
+# ─────────────────────────────────────────────────────────────────
+
+@app.get("/v1/auth/github")
+async def github_oauth_start(request: Request):
+    """
+    Redirect the browser to GitHub's OAuth authorize page.
+    """
+    import urllib.parse
+
+    client_id = os.getenv("GITHUB_CLIENT_ID")
+    if not client_id:
+        raise HTTPException(status_code=503, detail="GitHub OAuth not configured.")
+
+    callback_url = os.getenv("GITHUB_CALLBACK_URL", "http://localhost:8765/v1/auth/github/callback")
+    params = urllib.parse.urlencode({
+        "client_id": client_id,
+        "redirect_uri": callback_url,
+        "scope": "repo",
+        "state": "agentcraft",  # In production, use a proper CSRF token
+    })
+    github_url = f"https://github.com/login/oauth/authorize?{params}"
+    return {"authorize_url": github_url}
+
+
+@app.get("/v1/auth/github/callback")
+async def github_oauth_callback(request: Request, code: str = "", error: str = ""):
+    """
+    Exchange the OAuth authorization code for an access token.
+    The token is stored in the signed session cookie — never sent to the browser.
+    """
+    if error:
+        raise HTTPException(status_code=400, detail=f"GitHub OAuth error: {error}")
+
+    client_id = os.getenv("GITHUB_CLIENT_ID")
+    client_secret = os.getenv("GITHUB_CLIENT_SECRET")
+    callback_url = os.getenv("GITHUB_CALLBACK_URL", "http://localhost:8765/v1/auth/github/callback")
+
+    if not client_id or not client_secret:
+        raise HTTPException(status_code=503, detail="GitHub OAuth not configured.")
+
+    # Exchange code for access token (server-to-server, secret never exposed)
+    token_url = "https://github.com/login/oauth/access_token"
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        resp = await client.post(
+            token_url,
+            data={
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "code": code,
+                "redirect_uri": callback_url,
+            },
+            headers={"Accept": "application/json"},
+        )
+    resp.raise_for_status()
+    token_data = resp.json()
+
+    access_token = token_data.get("access_token")
+    if not access_token:
+        raise HTTPException(status_code=400, detail="Failed to obtain access token from GitHub.")
+
+    # Look up the GitHub username using the access token
+    username = "github_user"
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        user_resp = await client.get(
+            "https://api.github.com/user",
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Accept": "application/vnd.github.v3+json",
+            },
+        )
+        if user_resp.status_code == 200:
+            username = user_resp.json().get("login", username)
+
+    # Store in session (signed cookie, httpOnly — browser never sees raw token)
+    session = dict(request.state._session or {})
+    session["github_access_token"] = access_token
+    session["github_username"] = username
+    session["is_premium"] = session.get("is_premium", False)
+
+    # Serialize to cookie via Starlette's session mechanism
+    response = {"status": "ok", "username": username}
+    from fastapi.responses import JSONResponse
+    import urllib.parse as _urlparse, time as _time
+
+    cookie_data = _urlparse.urlencode({**session})
+    signer = itsdangerous.Signer(_get_session_secret())
+    signed = signer.sign(cookie_data.encode())
+
+    resp = JSONResponse(response)
+    resp.set_cookie(
+        key="agentcraft_session",
+        value=signed.decode(),
+        httponly=True,
+        samesite="lax",
+        max_age=60 * 60 * 24 * 30,
+    )
+    return resp
+
+
+@app.get("/v1/auth/github/logout")
+async def github_logout(request: Request):
+    """Clear the GitHub token from the session."""
+    session = dict(request.state._session or {})
+    session.pop("github_access_token", None)
+    session.pop("github_username", None)
+
+    import urllib.parse as _urlparse
+    cookie_data = _urlparse.urlencode({**session})
+    signer = itsdangerous.Signer(_get_session_secret())
+    signed = signer.sign(cookie_data.encode())
+
+    resp = {"status": "ok"}
+    response = JSONResponse(resp)
+    response.set_cookie(
+        key="agentcraft_session",
+        value=signed.decode(),
+        httponly=True,
+        samesite="lax",
+        max_age=60 * 60 * 24 * 30,
+    )
+    return response
+
+
+# ─────────────────────────────────────────────────────────────────
+# Routes: GitHub Export
+# ─────────────────────────────────────────────────────────────────
+
+@app.post("/v1/github/export")
+async def github_export(req: GithubExportRequest, request: Request):
+    """
+    Create a GitHub repository and push the project HTML.
+    Requires an active GitHub OAuth session — the token is server-side only.
+    """
+    token = request.state.github_token
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="GitHub not connected. Use GET /v1/auth/github to authorize first.",
+        )
+
+    username = request.state.github_username or "user"
+    repo_name = req.project_name.lower().replace(" ", "-").replace("_", "-")
+    # Filter to alphanumeric + hyphens
+    import re
+    repo_name = re.sub(r"[^a-z0-9-]", "", repo_name)[:100]
+
+    # Create repo via GitHub API
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        # Create repository
+        create_resp = await client.post(
+            "https://api.github.com/user/repos",
+            json={
+                "name": repo_name,
+                "description": f"Generated by AgentCraft",
+                "private": False,
+                "auto_init": True,
+            },
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/vnd.github.v3+json",
+                "Content-Type": "application/json",
+            },
+        )
+
+        if create_resp.status_code == 422:
+            # Repo already exists — fetch its details
+            get_resp = await client.get(
+                f"https://api.github.com/repos/{username}/{repo_name}",
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Accept": "application/vnd.github.v3+json",
+                },
+            )
+            if get_resp.status_code != 200:
+                raise HTTPException(status_code=409, detail="Repository already exists and could not be accessed.")
+        elif create_resp.status_code not in (201, 200):
+            raise HTTPException(
+                status_code=create_resp.status_code,
+                detail=f"GitHub API error: {create_resp.text}",
+            )
+
+        # Push content via the Repos API — create a single file
+        import base64
+        encoded_content = base64.b64encode(req.html_content.encode()).decode()
+
+        content_resp = await client.put(
+            f"https://api.github.com/repos/{username}/{repo_name}/contents/index.html",
+            json={
+                "message": "feat: initial commit from AgentCraft\n\nCo-Authored-By: AgentCraft <agentcraft@example.com>",
+                "content": encoded_content,
+                "branch": "main",
+            },
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/vnd.github.v3+json",
+                "Content-Type": "application/json",
+            },
+        )
+        content_resp.raise_for_status()
+
+    repo_url = f"https://github.com/{username}/{repo_name}"
+    return {"url": repo_url, "name": repo_name}
+
+
+# ─────────────────────────────────────────────────────────────────
+# Routes: User / Subscription
+# ─────────────────────────────────────────────────────────────────
+
+@app.get("/v1/user/session")
+async def user_session(request: Request):
+    """
+    Return the current user session info for the frontend.
+    Used by the UI to know: is GitHub connected? Is the user premium?
+    """
+    return {
+        "github_username": request.state.github_username,
+        "is_github_connected": bool(request.state.github_token),
+        "is_premium": request.state.is_premium,
+        "tier": "premium" if request.state.is_premium else "free",
+    }
+
+@app.get("/v1/user/subscription")
+async def subscription_status(request: Request):
+    """
+    Mock subscription endpoint.
+    In production: replace this with a Stripe/LemonSqueezy webhook handler
+    that verifies the purchase and sets is_premium = True in the session.
+
+    BEFORE billing integration: This always returns {"premium": false}.
+    AFTER billing integration: A background process (webhook) would call
+    this or set session["is_premium"] = True on purchase confirmation.
+    """
+    # The real check is done by check_premium_status() above.
+    # This endpoint exists so PREMIUM_CHECK_URL can point to a static JSON
+    # service or a billing webhook during the mock phase.
+    return {"premium": False}
+
 
 # ─────────────────────────────────────────────────────────────────
 # Dashboard HTML

@@ -226,12 +226,12 @@
               Free Tier
             </div>
             <ul class="tier-features">
-              <li>Bring your own API key</li>
+              <li>Server-side Moonshot proxy</li>
               <li>Full code generation</li>
-              <li>Project persistence</li>
-              <li>3 concurrent projects</li>
+              <li>Project persistence (local)</li>
+              <li>Export to GitHub (OAuth)</li>
             </ul>
-            <div class="tier-note">Uses your Moonshot API key securely in-browser.</div>
+            <div class="tier-note">API key lives on the server — never exposed to the browser.</div>
           </div>
           <div class="tier-card featured" id="premium-tier-card">
             <div class="tier-badge-corner">Recommended</div>
@@ -240,52 +240,44 @@
               AgentCraft Premium
             </div>
             <ul class="tier-features">
-              <li>Hosted API keys included</li>
-              <li>Priority generation</li>
+              <li>Hosted API key included</li>
+              <li>Priority generation queue</li>
               <li>Unlimited projects</li>
-              <li>Export to GitHub</li>
+              <li>GitHub repo creation + Pages deploy</li>
             </ul>
-            <div class="tier-note">Subscribe for hosted access — no API key needed.</div>
+            <div class="tier-note">Subscribe for hosted key — no server setup needed.</div>
           </div>
         </div>
 
-        <div class="form-group">
-          <label class="form-label" for="api-key-input">
-            Moonshot API Key
-            <span class="form-hint">(k1-... from <a href="https://platform.moonshot.cn" target="_blank" rel="noopener">platform.moonshot.cn</a>)</span>
-          </label>
-          <div class="input-with-action">
-            <input
-              id="api-key-input"
-              class="form-input"
-              type="password"
-              placeholder="sk-..."
-              autocomplete="off"
-              spellcheck="false"
-              aria-describedby="api-key-hint"
-            />
-            <button class="btn btn-ghost" id="toggle-api-key-visibility" type="button" aria-label="Toggle key visibility">
-              <i class="ti ti-eye"></i>
-            </button>
+        <div class="config-status">
+          <div class="config-row">
+            <span class="config-label">
+              <i class="ti ti-server"></i>
+              Backend Server
+            </span>
+            <span class="config-value" id="server-status-value">Checking...</span>
           </div>
-          <p id="api-key-hint" class="form-hint">
-            Your key is stored locally in your browser and never sent to any server except the Moonshot API directly.
-          </p>
-          <p class="form-error" id="api-key-error" hidden aria-live="polite"></p>
+          <div class="config-row">
+            <span class="config-label">
+              <i class="ti ti-crown"></i>
+              Current Tier
+            </span>
+            <span class="config-value" id="tier-status-value">Free</span>
+          </div>
+          <div class="config-row">
+            <span class="config-label">
+              <i class="ti ti-brand-github"></i>
+              GitHub Connection
+            </span>
+            <span class="config-value" id="github-status-value">Not connected</span>
+          </div>
         </div>
 
-        <div class="form-group">
-          <label class="form-label" for="base-url-input">API Base URL</label>
-          <input
-            id="base-url-input"
-            class="form-input"
-            type="url"
-            value="https://api.moonshot.cn/v1"
-            placeholder="https://api.moonshot.cn/v1"
-            spellcheck="false"
-          />
-          <p class="form-hint">Default: Moonshot's official API endpoint.</p>
-        </div>
+        <p class="form-hint" style="margin-top: 16px; text-align: center;">
+          Server configuration is managed via environment variables on the backend.<br />
+          See <code>.env.example</code> for required variables.
+        </p>
+        <p class="form-error" id="api-key-error" hidden aria-live="polite"></p>
       </div>
       <div class="modal-footer">
         <button class="btn btn-ghost" id="clear-api-key-btn" type="button">Clear Key</button>

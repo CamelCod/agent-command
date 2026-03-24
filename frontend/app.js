@@ -26,8 +26,8 @@ const STATE = {
   currentProjectId: null,
   currentTab: 'html',         // 'html' | 'css' | 'js'
   tier: 'free',               // 'free' | 'premium'
-  apiKey: '',
-  apiBaseUrl: 'https://api.moonshot.cn/v1',
+  githubConnected: false,
+  githubUsername: null,
   buildInProgress: false,
   isDraggingResize: false,
   projects: [],
@@ -415,16 +415,22 @@ ${htmlContent}
 // ─────────────────────────────────────────────────────────────────
 
 /**
- * Call the Moonshot API to generate frontend code from a text description.
+ * Call the /v1/chat/completions proxy to generate frontend code.
+ *
+ * BEFORE (insecure):
+ *   fetch('https://api.moonshot.cn/v1/chat/completions', {
+ *     headers: { 'Authorization': 'Bearer ' + localStorage.getItem('api_key') }
+ *   })
+ *   → User's real Moonshot key exposed in browser devtools + localStorage
+ *
+ * AFTER (secure):
+ *   fetch('/v1/chat/completions', { ... })  ← same origin, no auth header
+ *   → Server injects MOONSHOT_API_KEY from env; browser never sees the key.
+ *
  * @param {string} userIntent
  * @returns {Promise<string>} Generated HTML/CSS/JS code
  */
 async function generateFrontend(userIntent) {
-  const apiKey = STATE.apiKey || loadApiKey();
-  if (!apiKey) {
-    throw new Error('API key not configured. Please set your Moonshot API key.');
-  }
-
   const currentCode = getEditorContent();
 
   const systemPrompt = `You are AgentCraft, an expert frontend engineer.
@@ -450,12 +456,10 @@ Respond ONLY with a JSON object in this exact format:
   "description": "brief description of what was built"
 }`;
 
-  const response = await fetch(`${STATE.apiBaseUrl}/chat/completions`, {
+  // ─── Secure: talk to our own proxy, not Moonshot directly ───
+  const response = await fetch('/v1/chat/completions', {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${apiKey}`,
-    },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       model: 'kimi-k2.5',
       max_tokens: 4000,
@@ -469,7 +473,7 @@ Respond ONLY with a JSON object in this exact format:
 
   if (!response.ok) {
     const err = await response.json().catch(() => ({}));
-    throw new Error(err.error?.message || `API error: ${response.status}`);
+    throw new Error(err.detail || `Proxy error: ${response.status}`);
   }
 
   const data = await response.json();
@@ -580,10 +584,6 @@ function hideBuildPanel() {
  */
 async function runBuild(userIntent) {
   if (STATE.buildInProgress) return;
-  if (!STATE.apiKey && !loadApiKey()) {
-    openApiKeyModal();
-    return;
-  }
 
   STATE.buildInProgress = true;
   DOM.buildBtn.disabled = true;
@@ -595,7 +595,7 @@ async function runBuild(userIntent) {
     // Phase 1: Parse intent
     appendBuildLog('PARSE', 'Analyzing user intent and project context', 'info');
 
-    // Phase 2: Generate
+    // Phase 2: Generate — /v1/chat/completions proxy handles auth server-side
     appendBuildLog('GENERATE', 'Calling AI code generation model', 'info');
     const generated = await generateFrontend(userIntent);
 
@@ -696,66 +696,114 @@ function switchTab(tabName) {
 // ─────────────────────────────────────────────────────────────────
 //  API Key Management
 // ─────────────────────────────────────────────────────────────────
-
-const API_KEY_STORAGE = 'agentcraft_api_key';
-const API_BASE_STORAGE = 'agentcraft_api_base';
+//
+// BEFORE (insecure):
+//   API key stored in localStorage['agentcraft_api_key']
+//   → Visible in browser DevTools → Application → Local Storage
+//   → Visible in browser network tab requests to api.moonshot.cn
+//   → Accessible to any JS running on the page (XSS risk)
+//
+// AFTER (secure):
+//   API key lives in server environment variables only.
+//   Browser never holds the key — it calls /v1/chat/completions proxy.
+//   The modal shows server connection status instead of a key input.
+//
+// Feature gating is now server-enforced via /v1/user/session.
+// ─────────────────────────────────────────────────────────────────
 
 /**
- * Load API key from localStorage.
- * @returns {string}
+ * Ping the server to check if the backend is configured.
+ * @returns {Promise<boolean>}
  */
-function loadApiKey() {
+async function checkServerStatus() {
   try {
-    return localStorage.getItem(API_KEY_STORAGE) || '';
-  } catch { return ''; }
+    const resp = await fetch('/ping', { method: 'GET' });
+    return resp.ok;
+  } catch {
+    return false;
+  }
 }
 
 /**
- * Load API base URL from localStorage.
- * @returns {string}
+ * Fetch the current user session (GitHub auth + premium status).
+ * @returns {Promise<object>}
  */
-function loadApiBase() {
+async function fetchUserSession() {
   try {
-    return localStorage.getItem(API_BASE_STORAGE) || STATE.apiBaseUrl;
-  } catch { return STATE.apiBaseUrl; }
-}
-
-/**
- * Save API key to localStorage.
- * @param {string} key
- */
-function saveApiKey(key) {
-  try {
-    localStorage.setItem(API_KEY_STORAGE, key);
-    STATE.apiKey = key;
-    updateApiKeyStatus();
-  } catch (e) {
-    console.warn('[AgentCraft] Could not save API key:', e);
+    const resp = await fetch('/v1/user/session');
+    if (!resp.ok) return { is_premium: false, github_connected: false };
+    return resp.json();
+  } catch {
+    return { is_premium: false, github_connected: false };
   }
 }
 
 /**
  * Update the API key status indicator in the sidebar.
+ * The server handles the key now — we just show if the server is reachable.
  */
-function updateApiKeyStatus() {
-  const hasKey = !!(STATE.apiKey || loadApiKey());
-  DOM.apiKeyStatus.textContent = hasKey ? 'API Key set' : 'Set API Key';
-  DOM.apiKeyStatus.parentElement.classList.toggle('has-key', hasKey);
+function updateApiKeyStatus(serverOk) {
+  const status = serverOk ? 'Server connected' : 'Server offline';
+  DOM.apiKeyStatus.textContent = status;
 }
 
 /**
- * Open the API key modal.
+ * Open the configuration/status modal.
+ * Shows server health, tier, and GitHub connection state.
+ * MOONSHOT_API_KEY is server-side — no key input needed.
  */
 function openApiKeyModal() {
   DOM.apiKeyModal.hidden = false;
-  DOM.apiKeyInput.value = STATE.apiKey || loadApiKey();
-  DOM.baseUrlInput.value = STATE.apiBaseUrl || loadApiBase();
   DOM.apiKeyError.hidden = true;
 
-  // Highlight free tier by default (premium requires subscription)
-  DOM.freeTierCard.style.outline = '2px solid var(--accent)';
-  DOM.freeTierCard.style.outlineOffset = '-2px';
-  DOM.premiumTierCard.style.outline = 'none';
+  // Helper to get or create a status element in the modal
+  const getStatusEl = (id) => {
+    let el = DOM.apiKeyModal.querySelector(`#${id}`);
+    if (!el) {
+      el = document.createElement('span');
+      el.id = id;
+      el.className = 'config-value';
+      const row = DOM.apiKeyModal.querySelector(`.config-row #${id.replace('-value', '')}`);
+      if (row) row.appendChild(el);
+    }
+    return el;
+  };
+
+  const serverValueEl = getStatusEl('server-status-value');
+  const tierValueEl   = getStatusEl('tier-status-value');
+  const ghValueEl     = getStatusEl('github-status-value');
+
+  // Check server health
+  checkServerStatus().then(ok => {
+    if (ok) {
+      serverValueEl.textContent = 'Online';
+      serverValueEl.classList.add('connected');
+    } else {
+      serverValueEl.textContent = 'Offline — start api_server.py';
+      serverValueEl.style.color = 'var(--error)';
+      DOM.apiKeyError.textContent = 'Cannot reach the backend server. Is api_server.py running?';
+      DOM.apiKeyError.hidden = false;
+    }
+  });
+
+  // Sync session state from server
+  fetchUserSession().then(session => {
+    STATE.githubConnected = session.is_github_connected;
+    STATE.githubUsername = session.github_username;
+    STATE.tier = session.tier || 'free';
+    DOM.tierLabel.textContent = session.tier === 'premium' ? 'AgentCraft Premium' : 'Free Tier';
+    DOM.tierBadgeLabel.textContent = session.tier === 'premium' ? 'Premium' : 'Free';
+    applyTier();
+
+    tierValueEl.textContent = session.tier === 'premium' ? 'Premium' : 'Free';
+
+    if (session.is_github_connected) {
+      ghValueEl.textContent = `@${session.github_username}`;
+      ghValueEl.classList.add('connected');
+    } else {
+      ghValueEl.textContent = 'Not connected';
+    }
+  });
 }
 
 /**
@@ -763,32 +811,6 @@ function openApiKeyModal() {
  */
 function closeApiKeyModal() {
   DOM.apiKeyModal.hidden = true;
-}
-
-/**
- * Validate the API key by making a test request.
- * @param {string} key
- * @param {string} baseUrl
- * @returns {Promise<boolean>}
- */
-async function validateApiKey(key, baseUrl) {
-  try {
-    const response = await fetch(`${baseUrl}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${key}`,
-      },
-      body: JSON.stringify({
-        model: 'kimi-k2.5',
-        max_tokens: 10,
-        messages: [{ role: 'user', content: 'ping' }],
-      }),
-    });
-    return response.ok;
-  } catch {
-    return false;
-  }
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -850,7 +872,17 @@ function exportAsFolder() {
 }
 
 /**
- * Export to GitHub — create a new repo via gh CLI.
+ * Export to GitHub using the server-side OAuth flow.
+ *
+ * BEFORE (insecure):
+ *   gh repo create ... --push   ← requires gh CLI installed + authenticated
+ *   → access token stored in ~/.config/gh/hosts.yml on user's machine
+ *
+ * AFTER (secure):
+ *   POST /v1/github/export { project_name, html_content }
+ *   → Server uses the OAuth access_token stored in the signed session cookie.
+ *   → Token never leaves the server; browser only sees the repo URL.
+ *   → Works on any device with a browser — no CLI required.
  */
 async function exportToGithub() {
   closeExportModal();
@@ -858,32 +890,46 @@ async function exportToGithub() {
   const project = STATE.projects.find(p => p.id === STATE.currentProjectId);
   if (!project) return;
 
-  // Save current project first
   saveCurrentProject();
 
-  // Use gh CLI to create repo and push
-  const readme = `# ${project.name}\n\nGenerated by AgentCraft.\n`;
-  const html = buildFullDocument(project.html, project.css, project.js);
+  // Check if GitHub is connected via session
+  if (!STATE.githubConnected) {
+    // Initiate OAuth — redirect to our authorize URL
+    try {
+      const { authorize_url } = await fetch('/v1/auth/github').then(r => r.json());
+      window.location.href = authorize_url;
+    } catch {
+      appendBuildLog('GITHUB', 'Could not reach auth endpoint. Is the server running?', 'error');
+    }
+    return;
+  }
 
-  // Create temp directory
-  const tmpDir = `/tmp/${slug}`;
+  appendBuildLog('GITHUB', 'Creating repository and pushing...', 'info');
+
   try {
-    const { exec } = await import('node:fs/promises');
-    await exec(`mkdir -p ${tmpDir}`);
-    await exec(`cat > ${tmpDir}/README.md << 'EOF'\n${readme}\nEOF`);
-    await exec(`cat > ${tmpDir}/index.html << 'EOF'\n${html}\nEOF`);
-    await exec(`cd ${tmpDir} && git init && git add . && git commit -m "Initial commit from AgentCraft"`);
+    const html = buildFullDocument(project.html, project.css, project.js);
+    const resp = await fetch('/v1/github/export', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ project_name: slug, html_content: html }),
+    });
 
-    // Check if gh is authenticated
-    const ghCheck = await exec(`gh auth status 2>&1 || echo "NOT_AUTHED"`);
-    if (ghCheck.stdout.includes('NOT_AUTHED')) {
-      appendBuildLog('GITHUB', 'Please run: gh auth login', 'error');
+    if (resp.status === 401) {
+      // Token expired or revoked — re-authenticate
+      STATE.githubConnected = false;
+      appendBuildLog('GITHUB', 'Session expired. Reconnecting to GitHub...', 'error');
+      const { authorize_url } = await fetch('/v1/auth/github').then(r => r.json());
+      window.location.href = authorize_url;
       return;
     }
 
-    const repoUrl = `https://github.com/${await getGithubUsername()}/${slug}.git`;
-    await exec(`cd ${tmpDir} && gh repo create ${slug} --public --source=. --push`);
-    appendBuildLog('GITHUB', `Repository created: ${repoUrl}`, 'success');
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      throw new Error(err.detail || `Export failed: ${resp.status}`);
+    }
+
+    const { url } = await resp.json();
+    appendBuildLog('GITHUB', `Repository created: ${url}`, 'success');
   } catch (err) {
     appendBuildLog('GITHUB', `Export failed: ${err.message}`, 'error');
   }
@@ -1109,31 +1155,21 @@ function bindEvents() {
   // API key modal
   DOM.apiKeyBtn.addEventListener('click', openApiKeyModal);
   DOM.closeApiKeyModal.addEventListener('click', closeApiKeyModal);
-  DOM.saveApiKeyBtn.addEventListener('click', async () => {
-    const key = DOM.apiKeyInput.value.trim();
-    const baseUrl = DOM.baseUrlInput.value.trim() || STATE.apiBaseUrl;
-
-    if (key) {
-      DOM.apiKeyError.hidden = true;
-      const valid = await validateApiKey(key, baseUrl);
-      if (!valid) {
-        DOM.apiKeyError.textContent = 'Invalid API key. Please check and try again.';
-        DOM.apiKeyError.hidden = false;
-        return;
-      }
-    }
-
-    saveApiKey(key);
-    STATE.apiBaseUrl = baseUrl;
-    try { localStorage.setItem(API_BASE_STORAGE, baseUrl); } catch {}
+  DOM.saveApiKeyBtn.addEventListener('click', () => {
+    // No key to save — the server holds MOONSHOT_API_KEY in its env.
+    // Just close and refresh the session status.
+    fetchUserSession().then(session => {
+      STATE.githubConnected = session.is_github_connected;
+      STATE.githubUsername = session.github_username;
+      STATE.tier = session.tier || 'free';
+      applyTier();
+    });
     closeApiKeyModal();
   });
 
   DOM.clearApiKeyBtn.addEventListener('click', () => {
-    DOM.apiKeyInput.value = '';
-    STATE.apiKey = '';
-    try { localStorage.removeItem(API_KEY_STORAGE); } catch {}
-    updateApiKeyStatus();
+    // No client-side key to clear — if the server key is wrong,
+    // it must be fixed in the server environment, not the browser.
     closeApiKeyModal();
   });
 
@@ -1204,15 +1240,23 @@ function saveCurrentProjectDebounced() {
 // ─────────────────────────────────────────────────────────────────
 
 async function init() {
-  // Load persisted state
-  STATE.apiKey = loadApiKey();
-  STATE.apiBaseUrl = loadApiBase();
+  // Load persisted state (projects are still localStorage-only)
   STATE.projects = loadProjects();
   STATE.tier = localStorage.getItem('agentcraft_tier') || 'free';
 
-  // Apply tier
+  // Fetch server-side session to get GitHub auth + premium status
+  // This also implicitly checks whether the server is configured.
+  const session = await fetchUserSession();
+  STATE.githubConnected = session.is_github_connected;
+  STATE.githubUsername = session.github_username;
+  STATE.tier = session.tier || 'free';
+
+  // Apply tier to UI
   applyTier();
-  updateApiKeyStatus();
+
+  // Check server health for status indicator
+  const serverOk = await checkServerStatus();
+  updateApiKeyStatus(serverOk);
 
   // Ensure at least one project exists
   if (STATE.projects.length === 0) {
@@ -1231,7 +1275,9 @@ async function init() {
   // Initial preview render
   renderPreview();
 
-  console.log('[AgentCraft] Initialized');
+  console.log('[AgentCraft] Initialized — tier:', STATE.tier,
+    '| github:', STATE.githubConnected ? STATE.githubUsername : 'not connected',
+    '| server:', serverOk ? 'online' : 'OFFLINE');
 }
 
 // Start the app
