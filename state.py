@@ -119,6 +119,7 @@ class AgentState(TypedDict):
     probe_score: float                  # PROBE composite score
     review_report: Optional[str]        # LENS
     lens_score: float                   # LENS composite score
+    forge_patch_notes: Optional[str]     # LENS targeted fix notes for FORGE retry
 
     # ── Tier 4 Outputs (Ship) ─────────────────
     deployment_config: Optional[str]    # LAUNCH

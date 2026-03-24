@@ -28,6 +28,111 @@ import config
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+#  Agent-Specific ECHO Evaluation Templates
+#  Key = agent_id, Value = override prompt template
+#  Agents not listed here use the generic ECHO_SCORING_TEMPLATE
+# ─────────────────────────────────────────────────────────────────────────────
+
+ECHO_AGENT_TEMPLATES = {
+
+    "PIXEL": """You are ECHO, an expert frontend code reviewer.
+Evaluate this frontend code output.
+
+AGENT ROLE: Frontend developer — produces HTML/CSS/JS/React code
+INPUT GOAL: {input_summary}
+
+CODE OUTPUT (first 4000 chars):
+{output_summary}
+
+Score ONLY these 4 dimensions (0.0 to 10.0 each):
+1. correctness — Does the code run without errors? Is syntax valid?
+2. completeness — Does it implement the required UI components and features?
+3. quality — Is the HTML semantic? CSS clean? JS robust? Are forms, buttons, inputs functional?
+4. adherence — Does the output match the input specification?
+
+Provide EXACTLY this JSON (no other text):
+{{"score_quality":0.0,"score_completeness":0.0,"score_contract_adherence":0.0,"score_efficiency":0.0,"score_innovation":0.0,"assessment":"...","improvement_suggestions":["...","..."]}}
+""",
+
+    "FORGE": """You are ECHO, an expert backend code reviewer.
+Evaluate this backend code output.
+
+AGENT ROLE: Backend developer — produces Python/FastAPI/Go/etc code
+INPUT GOAL: {input_summary}
+
+CODE OUTPUT (first 4000 chars):
+{output_summary}
+
+Score ONLY these 4 dimensions (0.0 to 10.0 each):
+1. correctness — Does the code compile? Are imports correct? Endpoints defined?
+2. completeness — Does it implement all API endpoints from the spec?
+3. quality — Is the code clean? Are errors handled? Auth implemented?
+4. adherence — Does it match the architecture and API contract?
+
+Provide EXACTLY this JSON (no other text):
+{{"score_quality":0.0,"score_completeness":0.0,"score_contract_adherence":0.0,"score_efficiency":0.0,"score_innovation":0.0,"assessment":"...","improvement_suggestions":["...","..."]}}
+""",
+
+    "VAULT": """You are ECHO, an expert database engineer.
+Evaluate this SQL migration output.
+
+AGENT ROLE: Database engineer — produces PostgreSQL migrations
+INPUT GOAL: {input_summary}
+
+SQL OUTPUT:
+{output_summary}
+
+Score ONLY these 4 dimensions (0.0 to 10.0 each):
+1. correctness — Are CREATE TABLE statements valid? FK relationships correct?
+2. completeness — Are all entities from the data schema migrated?
+3. quality — Are indexes on FK columns? Constraints defined? Soft deletes present?
+4. adherence — Does the schema match the data_schema specification?
+
+Provide EXACTLY this JSON (no other text):
+{{"score_quality":0.0,"score_completeness":0.0,"score_contract_adherence":0.0,"score_efficiency":0.0,"score_innovation":0.0,"assessment":"...","improvement_suggestions":["...","..."]}}
+""",
+
+    "PROBE": """You are ECHO, an expert QA engineer.
+Evaluate this test suite output.
+
+AGENT ROLE: QA engineer — produces unit/integration tests
+INPUT GOAL: {input_summary}
+
+TEST OUTPUT:
+{output_summary}
+
+Score ONLY these 4 dimensions (0.0 to 10.0 each):
+1. coverage — Are core functions and endpoints tested?
+2. correctness — Do tests have valid assertions? Correct setup/teardown?
+3. quality — Are tests isolated? Are edge cases covered?
+4. adherence — Do tests match the specified acceptance criteria?
+
+Provide EXACTLY this JSON (no other text):
+{{"score_quality":0.0,"score_completeness":0.0,"score_contract_adherence":0.0,"score_efficiency":0.0,"score_innovation":0.0,"assessment":"...","improvement_suggestions":["...","..."]}}
+""",
+
+    "LENS": """You are ECHO, an expert code reviewer.
+Evaluate this code review output.
+
+AGENT ROLE: Code reviewer — produces detailed code review with BLOCKER/PASS verdict
+INPUT GOAL: {input_summary}
+
+REVIEW OUTPUT:
+{output_summary}
+
+Score ONLY these 4 dimensions (0.0 to 10.0 each):
+1. thoroughness — Were all files reviewed? Were edge cases considered?
+2. accuracy — Are the BLOCKER findings valid and correctly identified?
+3. usefulness — Are suggestions actionable? Is the verdict justified?
+4. adherence — Does the review match the architecture specification?
+
+Provide EXACTLY this JSON (no other text):
+{{"score_quality":0.0,"score_completeness":0.0,"score_contract_adherence":0.0,"score_efficiency":0.0,"score_innovation":0.0,"assessment":"...","improvement_suggestions":["...","..."]}}
+""",
+}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 #  ECHO Scoring Prompt
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -132,12 +237,20 @@ class Echo:
         weights = config.ECHO_SCORING["tier_weights"][tier]
         agent_role = AGENT_ROLES.get(agent_id, "Specialized AI agent")
 
-        prompt = ECHO_SCORING_TEMPLATE.format(
-            agent_id=agent_id,
-            agent_role=agent_role,
-            input_summary=input_summary[:2000],   # Truncate for context limits
-            output_summary=output_summary[:3000],
-        )
+        # Use agent-specific template if available, otherwise use generic
+        if agent_id in ECHO_AGENT_TEMPLATES:
+            prompt = ECHO_AGENT_TEMPLATES[agent_id].format(
+                agent_id=agent_id,
+                input_summary=input_summary[:2000],
+                output_summary=output_summary[:4000],
+            )
+        else:
+            prompt = ECHO_SCORING_TEMPLATE.format(
+                agent_id=agent_id,
+                agent_role=agent_role,
+                input_summary=input_summary[:2000],
+                output_summary=output_summary[:3000],
+            )
 
         try:
             response = await self.client.chat.completions.create(
@@ -170,22 +283,57 @@ class Echo:
                         continue
 
             # Strategy 2: parse score values from text (reasoning or content)
-            if not parsed_scores:
-                text = reasoning or content
-                parsed_scores = {}
-                found = False
-                for field in ["score_quality", "score_completeness", "score_contract_adherence",
-                              "score_efficiency", "score_innovation"]:
-                    m = re.search(rf'"{field}"\s*:\s*([0-9.]+)', text)
+            text = reasoning or content
+            parsed_scores = {}
+            found = False
+            for field in ["score_quality", "score_completeness", "score_contract_adherence",
+                          "score_efficiency", "score_innovation"]:
+                # Try multiple patterns: quoted JSON, plain text, with/without quotes
+                patterns = [
+                    rf'"{field}"\s*:\s*([0-9.]+)',
+                    rf"'{field}'\s*:\s*([0-9.]+)",
+                    rf'{field}\s*:\s*([0-9.]+)',
+                    rf'{field}[^0-9]*([0-9.]+)',
+                ]
+                for pat in patterns:
+                    m = re.search(pat, text, re.IGNORECASE)
                     if m:
-                        parsed_scores[field] = float(m.group(1))
-                        found = True
-                if found:
-                    parsed_scores.setdefault("assessment", "")
-                    parsed_scores.setdefault("improvement_suggestions", [])
+                        val = float(m.group(1))
+                        if 0 <= val <= 10:
+                            parsed_scores[field] = val
+                            found = True
+                            break
 
-            if not parsed_scores or not any(k in parsed_scores for k in ["score_quality"]):
-                raise ValueError(f"No score fields found. content={content[:100]}, reasoning={reasoning[:100]}")
+            # Strategy 3: scan ALL number-like values near field mentions (fill gaps)
+            for field in ["quality", "completeness", "contract_adherence", "efficiency", "innovation"]:
+                full = f"score_{field}"
+                if full in parsed_scores:
+                    continue
+                idx = text.lower().find(full.lower())
+                if idx >= 0:
+                    snippet = text[idx:idx+40]
+                    for n in re.findall(r'[0-9]+(?:\.[0-9]+)?', snippet):
+                        try:
+                            val = float(n)
+                            if 0 <= val <= 10:
+                                parsed_scores[full] = val
+                                break
+                        except ValueError:
+                            continue
+
+            if found:
+                parsed_scores.setdefault("assessment", "")
+                parsed_scores.setdefault("improvement_suggestions", [])
+
+            # If we found at least one score, fill in missing ones with 5.0
+            if parsed_scores and any(k in parsed_scores for k in ["score_quality"]):
+                score_keys = ["score_quality", "score_completeness", "score_contract_adherence",
+                             "score_efficiency", "score_innovation"]
+                for k in score_keys:
+                    parsed_scores.setdefault(k, 5.0)
+            else:
+                # No scores found at all — raise so we fall through to exception handler
+                raise ValueError(f"No score fields found in content or reasoning.")
 
         except Exception as e:
             # Fallback — neutral scores, don't break pipeline
@@ -201,6 +349,12 @@ class Echo:
             }
 
         # Compute weighted composite score
+        # Compute weighted composite score — use defaults for any missing fields
+        score_keys = ["score_quality", "score_completeness", "score_contract_adherence",
+                      "score_efficiency", "score_innovation"]
+        for k in score_keys:
+            parsed_scores.setdefault(k, 5.0)
+
         composite = (
             parsed_scores["score_quality"]            * weights["quality"] +
             parsed_scores["score_completeness"]       * weights["completeness"] +

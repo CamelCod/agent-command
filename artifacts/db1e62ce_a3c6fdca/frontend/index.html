@@ -1,0 +1,344 @@
+## PHASE 1: CONTRACT & ARCHITECTURE LOCK
+
+[VALIDATION CHECKLIST - MUST PASS BEFORE PROCEEDING]
+□ Architecture: Listed all components from ATLAS: [ReportList, ReportDetail, ReportEditor, PhotoUploader, PhotoGallery, StatusBadge, SignaturePad, Navigation, EmptyState, ErrorFallback, Skeleton]
+□ API Contract: Mapped every endpoint from FORGE:
+   - GET /api/v1/reports: Returns {reports: Array<{id: string, site_id: string, report_date: string, status: 'DRAFT' | 'SUBMITTED' | 'APPROVED' | 'REJECTED', version: number}>} → Implemented in: app/_hooks/use-reports.ts
+   - POST /api/v1/reports: Returns {id: string, site_id: string, report_date: string, status: 'DRAFT', version: number} → Implemented in: app/_hooks/use-reports.ts
+   - GET /api/v1/reports/{id}: Returns full report with photos → Implemented in: app/_hooks/use-report.ts
+   - PATCH /api/v1/reports/{id}: Requires If-Match header, returns updated report → Implemented in: app/_hooks/use-update-report.ts
+   - POST /api/v1/reports/{id}/photos: multipart/form-data, max 10 files, 10MB → Implemented in: app/_components/features/PhotoUploader.tsx
+   - GET /api/v1/reports/{id}/photos/{photo_id}/url: Returns {url: string, expires_at: string} → Implemented in: app/_hooks/use-photo-url.ts
+   - DELETE /api/v1/reports/{id}/photos/{photo_id}: Requires If-Match → Implemented in: app/_hooks/use-delete-photo.ts
+   - POST /api/v1/reports/{id}/submit: State transition DRAFT→SUBMITTED → Implemented in: app/_hooks/use-submit-report.ts
+   - POST /api/v1/reports/{id}/approve: State transition SUBMITTED→APPROVED → Implemented in: app/_hooks/use-approve-report.ts
+   - POST /api/v1/reports/{id}/reject: State transition SUBMITTED→REJECTED → Implemented in: app/_hooks/use-reject-report.ts
+□ Routes: All navigation flows accounted for: [/reports (list), /reports/new (create), /reports/[id] (view/edit), /reports/[id]/sign (digital signature)]
+□ States: Defined loading/error/empty/success for each data fetch
+
+[CONTRACT MAPPING TABLE]
+| Endpoint | Contract Schema | Implementation Location | Validation Library |
+|----------|----------------|------------------------|-------------------|
+| GET /api/v1/reports | {reports: Array<{id: string, site_id: string, report_date: string, status: string, version: number}>} | app/_hooks/use-reports.ts | Zod schema: ReportsResponseSchema |
+| POST /api/v1/reports | {id: string, site_id: string, report_date: string, status: 'DRAFT', version: number} | app/_hooks/use-create-report.ts | Zod schema: ReportSchema |
+| PATCH /api/v1/reports/{id} | {id: string, site_id: string, content: string, weather_conditions: string, work_completed: string, status: string, version: number} | app/_hooks/use-update-report.ts | Zod schema: ReportSchema |
+| POST /api/v1/reports/{id}/photos | {photos: Array<{id: string, filename: string, uploaded_at: string}>} | app/_components/features/PhotoUploader.tsx | Zod schema: PhotoUploadResponseSchema |
+| GET /api/v1/reports/{id}/photos/{photo_id}/url | {url: string, expires_at: string} | app/_hooks/use-photo-url.ts | Zod schema: PresignedUrlSchema |
+| POST /api/v1/reports/{id}/submit | {id: string, status: 'SUBMITTED', version: number} | app/_hooks/use-submit-report.ts | Zod schema: ReportSchema |
+| POST /api/v1/reports/{id}/approve | {id: string, status: 'APPROVED', signature_hash: string, version: number} | app/_hooks/use-approve-report.ts | Zod schema: ReportSchema |
+| POST /api/v1/reports/{id}/reject | {id: string, status: 'REJECTED', rejection_reason: string, version: number} | app/_hooks/use-reject-report.ts | Zod schema: ReportSchema |
+
+[COMPLETENESS AUDIT]
+Components from ATLAS:
+- [x] ReportList (REQUIRED)
+- [x] ReportDetail (REQUIRED)
+- [x] ReportEditor (REQUIRED)
+- [x] PhotoUploader (REQUIRED)
+- [x] PhotoGallery (REQUIRED)
+- [x] StatusBadge (REQUIRED)
+- [x] SignaturePad (REQUIRED)
+- [x] Navigation (REQUIRED)
+- [x] EmptyState (REQUIRED)
+- [x] ErrorFallback (REQUIRED)
+- [x] LoadingSkeleton (REQUIRED)
+
+---
+
+## PHASE 2: TYPE SCHEMA & VALIDATION LAYER
+
+```typescript
+// app/_types/api.ts
+// Generated strictly from FORGE's contract - NO DEVIATIONS
+
+import { z } from 'zod';
+
+// Enums matching contract exactly
+export const ReportStatusSchema = z.enum(['DRAFT', 'SUBMITTED', 'APPROVED', 'REJECTED']);
+export type ReportStatus = z.infer<typeof ReportStatusSchema>;
+
+// Core Report Schema - camelCase as per contract
+export const ReportSchema = z.object({
+  id: z.string().uuid(),
+  site_id: z.string().uuid(),
+  report_date: z.string().datetime(), // ISO 8601
+  status: ReportStatusSchema,
+  content: z.string().optional(),
+  weather_conditions: z.string().optional(),
+  work_completed: z.string().optional(),
+  created_by: z.string().uuid(),
+  created_at: z.string().datetime(),
+  updated_at: z.string().datetime(),
+  version: z.number().int().positive(), // For optimistic locking
+  photos: z.array(z.object({
+    id: z.string().uuid(),
+    filename: z.string(),
+    uploaded_at: z.string().datetime(),
+    processed: z.boolean()
+  })).optional()
+});
+
+export type Report = z.infer<typeof ReportSchema>;
+
+// Request/Response Schemas
+export const CreateReportRequestSchema = z.object({
+  site_id: z.string().uuid(),
+  report_date: z.string().datetime()
+});
+
+export const UpdateReportRequestSchema = z.object({
+  content: z.string().max(5000).optional(),
+  weather_conditions: z.string().max(500).optional(),
+  work_completed: z.string().max(2000).optional()
+});
+
+export const PhotoUploadResponseSchema = z.object({
+  photos: z.array(z.object({
+    id: z.string().uuid(),
+    filename: z.string(),
+    uploaded_at: z.string().datetime(),
+    processed: z.boolean()
+  }))
+});
+
+export const PresignedUrlSchema = z.object({
+  url: z.string().url(),
+  expires_at: z.string().datetime()
+});
+
+export const ApiErrorSchema = z.object({
+  error: z.object({
+    code: z.string(),
+    message: z.string(),
+    details: z.record(z.unknown()).optional()
+  })
+});
+
+export type ApiError = z.infer<typeof ApiErrorSchema>;
+
+// State Transition Validation
+export const canTransitionTo = (
+  current: ReportStatus,
+  next: ReportStatus,
+  userRole: 'SUPERVISOR' | 'MANAGER' | 'OFFICER'
+): boolean => {
+  const transitions: Record<ReportStatus, ReportStatus[]> = {
+    DRAFT: ['SUBMITTED'],
+    SUBMITTED: ['APPROVED', 'REJECTED'],
+    APPROVED: [],
+    REJECTED: []
+  };
+  
+  if (!transitions[current].includes(next)) return false;
+  
+  // Role-based permissions
+  if (next === 'SUBMITTED' && userRole !== 'SUPERVISOR') return false;
+  if (['APPROVED', 'REJECTED'].includes(next) && 
+      !['MANAGER', 'OFFICER'].includes(userRole)) return false;
+      
+  return true;
+};
+
+// Optimistic Locking Headers
+export interface OptimisticLockHeaders {
+  'If-Match': string;
+}
+
+export const generateETag = (version: number): string => `"${version}"`;
+```
+
+```typescript
+// app/_lib/validations.ts
+import { z } from 'zod';
+
+export const fileUploadSchema = z.object({
+  files: z.array(z.instanceof(File))
+    .max(10, 'Maximum 10 photos allowed')
+    .refine(
+      (files) => files.every(f => f.size <= 10 * 1024 * 1024),
+      'Each file must be less than 10MB'
+    )
+    .refine(
+      (files) => files.every(f => f.type.startsWith('image/')),
+      'Only image files allowed'
+    )
+});
+
+export const signatureSchema = z.object({
+  signature_data: z.string().min(1, 'Signature required')
+});
+
+export const rejectionSchema = z.object({
+  reason: z.string().min(1, 'Rejection reason required').max(500)
+});
+```
+
+---
+
+## PHASE 3: IMPLEMENTATION WITH QUALITY GATES
+
+### 3.1 API Client with Optimistic Locking
+
+```typescript
+// app/_lib/api-client.ts
+import { z } from 'zod';
+import { ApiErrorSchema, type OptimisticLockHeaders } from '../_types/api';
+
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080/api/v1';
+
+class ApiClient {
+  private async request<T>(
+    endpoint: string,
+    options: RequestInit & { schema: z.ZodType<T>; etag?: number }
+  ): Promise<{ data: T; etag?: string }> {
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      ...((options.headers as Record<string, string>) || {})
+    };
+
+    if (options.etag) {
+      headers['If-Match'] = `"${options.etag}"`;
+    }
+
+    const response = await fetch(`${API_BASE}${endpoint}`, {
+      ...options,
+      headers
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({ error: { message: 'Unknown error' } }));
+      const parsed = ApiErrorSchema.safeParse(errorData);
+      
+      throw new ApiError(
+        response.status,
+        parsed.success ? parsed.data.error.message : errorData.error?.message || 'Request failed',
+        parsed.success ? parsed.data.error.code : 'UNKNOWN'
+      );
+    }
+
+    const data = await response.json();
+    const parsed = options.schema.safeParse(data);
+    
+    if (!parsed.success) {
+      console.error('Contract violation:', parsed.error);
+      throw new Error('API response does not match contract');
+    }
+
+    return {
+      data: parsed.data,
+      etag: response.headers.get('ETag') || undefined
+    };
+  }
+
+  async get<T>(endpoint: string, schema: z.ZodType<T>) {
+    return this.request(endpoint, { method: 'GET', schema });
+  }
+
+  async post<T>(endpoint: string, body: unknown, schema: z.ZodType<T>) {
+    return this.request(endpoint, {
+      method: 'POST',
+      body: JSON.stringify(body),
+      schema
+    });
+  }
+
+  async patch<T>(endpoint: string, body: unknown, schema: z.ZodType<T>, etag: number) {
+    return this.request(endpoint, {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+      schema,
+      etag
+    });
+  }
+
+  async delete(endpoint: string, etag: number) {
+    return this.request(endpoint, {
+      method: 'DELETE',
+      schema: z.object({ success: z.boolean() }),
+      etag
+    });
+  }
+
+  // Special handler for multipart uploads
+  async uploadPhotos(reportId: string, files: File[]) {
+    const formData = new FormData();
+    files.forEach(file => formData.append('photos', file));
+
+    const response = await fetch(`${API_BASE}/reports/${reportId}/photos`, {
+      method: 'POST',
+      body: formData,
+      // Don't set Content-Type - browser will set with boundary
+    });
+
+    if (!response.ok) {
+      throw new ApiError(response.status, 'Upload failed', 'UPLOAD_ERROR');
+    }
+
+    return response.json();
+  }
+}
+
+export class ApiError extends Error {
+  constructor(
+    public status: number,
+    message: string,
+    public code: string
+  ) {
+    super(message);
+    this.name = 'ApiError';
+  }
+}
+
+export const apiClient = new ApiClient();
+```
+
+### 3.2 React Query Hooks
+
+```typescript
+// app/_hooks/use-reports.ts
+'use client';
+
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { apiClient } from '../_lib/api-client';
+import { ReportSchema, CreateReportRequestSchema, type Report } from '../_types/api';
+import { z } from 'zod';
+
+const ReportsArraySchema = z.array(ReportSchema);
+
+export const useReports = () => {
+  return useQuery({
+    queryKey: ['reports'],
+    queryFn: async () => {
+      const { data } = await apiClient.get('/reports', ReportsArraySchema);
+      return data;
+    }
+  });
+};
+
+export const useReport = (id: string) => {
+  return useQuery({
+    queryKey: ['reports', id],
+    queryFn: async () => {
+      const { data, etag } = await apiClient.get(`/reports/${id}`, ReportSchema);
+      return { data, etag };
+    },
+    enabled: !!id
+  });
+};
+
+export const useCreateReport = () => {
+  const queryClient = useQueryClient();
+  
+  return useMutation({
+    mutationFn: async (input: { site_id: string; report_date: string }) => {
+      const validated = CreateReportRequestSchema.parse(input);
+      const { data } = await apiClient.post('/reports', validated, ReportSchema);
+      return data;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['reports'] });
+    }
+  });
+};
+
+export const useUpdateReport = () => {
+  const queryClient = useQueryClient();

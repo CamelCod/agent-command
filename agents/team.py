@@ -127,6 +127,15 @@ class Forge(BaseAgent):
     agent_id = "FORGE"
 
     def _build_prompt(self, state: AgentState) -> str:
+        forge_patch = state.get("forge_patch_notes", "")
+        patch_section = ""
+        if forge_patch:
+            patch_section = f"""
+## PRIORITY: Apply these targeted fixes FIRST:
+{forge_patch}
+---
+"""
+
         return f"""ARCHITECTURE from ATLAS:
 {state.get('architecture', 'Not available')[:2000]}
 
@@ -138,7 +147,7 @@ DATA SCHEMA from VAULT context:
 
 PRD requirements:
 {state.get('prd', 'Not available')[:500]}
-
+{patch_section}
 Build the complete backend application.
 Implement every endpoint in the API contract.
 Write actual, production-ready code."""
@@ -264,14 +273,31 @@ Architecture spec to validate against:
 {state.get('architecture', 'Not available')[:800]}
 
 Perform a thorough code review.
-Score each criterion. Issue a final PASS/BLOCK verdict."""
+Score each criterion. Issue a final PASS/BLOCK verdict.
+
+IMPORTANT — Also output a FORGE_PATCH section at the END of your response if there are code issues:
+
+## FORGE_PATCH
+1. [FILENAME] Specific fix — one sentence
+2. [FILENAME] Another fix
+...
+
+Only include FORGE_PATCH if there are actual code issues. If code is good, omit this section entirely."""
 
     def _parse_output(self, state: AgentState, output: str) -> Dict[str, Any]:
         passed = "❌ BLOCK" not in output and ("✅ PASS" in output or "PASS" in output.upper())
         score = 8.0 if passed else 4.0
+
+        # Extract FORGE_PATCH notes for targeted fix
+        forge_patch = ""
+        if "## FORGE_PATCH" in output:
+            parts = output.split("## FORGE_PATCH", 1)
+            forge_patch = parts[1].strip()
+
         return {
             "review_report": output,
             "lens_score": score,
+            "forge_patch_notes": forge_patch,
         }
 
 

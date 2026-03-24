@@ -171,6 +171,21 @@ class Darwin:
                 records.append(record)
         return records
 
+    async def evolve_agents(self, agent_ids: List[str]) -> List[EvolutionRecord]:
+        """
+        Run targeted evolution on specific agents only.
+        Useful for focusing improvement efforts on underperforming agents.
+        """
+        records = []
+        for agent_id in agent_ids:
+            if agent_id not in config.AGENT_TIERS:
+                print(f"[DARWIN] Unknown agent: {agent_id}. Skipping.")
+                continue
+            record = await self.check_and_evolve(agent_id)
+            if record:
+                records.append(record)
+        return records
+
     async def _evolve(
         self,
         agent_id: str,

@@ -95,7 +95,8 @@ def build_graph(memoria: Memoria, echo: Echo, darwin: Darwin, analytics: Pipelin
     graph.add_node("darwin_check", _make_darwin_check(darwin, analytics))
 
     # ── Final Report ─────────────────────────────────────────────────────────
-    graph.add_node("finalize", lambda state: _finalize(state, analytics))
+    from functools import partial
+    graph.add_node("finalize", partial(_finalize, analytics=analytics))
 
     # ─────────────────────────────────────────────────────────────────────────
     #  EDGES — the flow of the pipeline
@@ -299,9 +300,18 @@ def _make_quality_gate(analytics: PipelineAnalytics | None):
     return _node
 
 
+async def _write_artifact(path: Path, content: str):
+    """Fire-and-forget artifact write — never blocks the pipeline."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content)
+        print(f"  [DISK] {path}")
+    except Exception as e:
+        print(f"  [DISK ERROR] {path}: {e}")
+
 async def _finalize(state: AgentState, analytics: PipelineAnalytics | None = None) -> Dict[str, Any]:
-    """Compile the final report for the human. Persist artifacts to disk."""
-    import os, hashlib
+    """Compile the final report for the human. Persist artifacts to disk (async, non-blocking)."""
+    import hashlib
     from pathlib import Path
 
     project_id = state.get("project_id", "unknown")
@@ -309,32 +319,35 @@ async def _finalize(state: AgentState, analytics: PipelineAnalytics | None = Non
     artifact_dir = Path(f"./artifacts/{project_id}_{intent_slug}")
     artifact_dir.mkdir(parents=True, exist_ok=True)
 
-    # Persist all deliverables
-    deliverables = {
+    # Persist all deliverables — fire-and-forget, never block pipeline
+    file_deliverables = {
         "prd.md": state.get("prd"),
         "architecture.md": state.get("architecture"),
         "api_contract.md": state.get("api_contract"),
         "data_schema.md": state.get("data_schema"),
-        "frontend/": state.get("frontend_code"),
-        "backend/": state.get("backend_code"),
         "migrations.sql": state.get("database_migrations"),
         "security_audit.md": state.get("security_audit"),
-        "ai_modules/": state.get("ai_modules"),
-        "tests/": state.get("test_suite"),
-        "deployment/": state.get("deployment_config"),
-        "observability/": state.get("observability_config"),
-        "docs/": state.get("documentation"),
     }
-
-    for name, content in deliverables.items():
+    for name, content in file_deliverables.items():
         if content:
             path = artifact_dir / name
-            if name.endswith("/"):
-                path.mkdir(parents=True, exist_ok=True)
-                continue
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(content)
-            print(f"  [DISK] {path}")
+            asyncio.create_task(_write_artifact(path, content))
+
+    # Write code bundles to their respective directories
+    code_bundles = {
+        "frontend/index.html": state.get("frontend_code"),
+        "backend/main.py": state.get("backend_code"),
+        "tests/test_suite.py": state.get("test_suite"),
+        "deployment/docker-compose.yml": state.get("deployment_config"),
+        "observability/prometheus.yml": state.get("observability_config"),
+        "docs/README.md": state.get("documentation"),
+    }
+    for name, content in code_bundles.items():
+        if content:
+            path = artifact_dir / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            asyncio.create_task(_write_artifact(path, content))
 
     # Build summary
     echo_reports = state.get("echo_reports", [])

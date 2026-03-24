@@ -553,28 +553,31 @@ class BaseAgent:
             latency_ms = int((time.time() - start) * 1000)
             output = response.choices[0].message.content or response.choices[0].message.reasoning_content or ""
 
-            if obs:
-                try:
-                    obs.update(
-                        output=output,
-                        usage_details={
-                            "input_tokens": response.usage.prompt_tokens if response.usage else 0,
-                            "output_tokens": response.usage.completion_tokens if response.usage else 0,
-                            "total_tokens": response.usage.total_tokens if response.usage else 0,
-                        },
-                    )
-                    obs.end()
-                except Exception as e:
-                    print(f"[{self.agent_id}] Langfuse update error: {e}")
-                    try:
-                        obs.end()
-                    except:
-                        pass
-
-            return output
+            # Return Langfuse data for fire-and-forget update (never block pipeline)
+            usage_details = {
+                "input_tokens": response.usage.prompt_tokens if response.usage else 0,
+                "output_tokens": response.usage.completion_tokens if response.usage else 0,
+                "total_tokens": response.usage.total_tokens if response.usage else 0,
+            }
+            return output, obs, usage_details
 
         finally:
             self.rate_limiter.release()
+
+    async def _emit_langfuse_async(self, obs, output: str, usage_details: dict):
+        """
+        Fire-and-forget Langfuse update — never blocks the pipeline.
+        Wrapped in try/except so Langfuse failures never propagate.
+        """
+        try:
+            obs.update(output=output, usage_details=usage_details)
+            obs.end()
+        except Exception as e:
+            print(f"[{self.agent_id}] Langfuse emit error: {e}")
+            try:
+                obs.end()
+            except:
+                pass
 
     async def invoke(self, state: AgentState) -> Dict[str, Any]:
         """
@@ -587,8 +590,8 @@ class BaseAgent:
         # Build the user message for this agent
         user_message = self._build_prompt(state)
 
-        # Call Claude
-        output = await self._call_claude(genome, user_message)
+        # Call Claude — returns (output, obs, usage_details)
+        output, obs, usage_details = await self._call_claude(genome, user_message)
 
         duration_ms = int(time.time() * 1000) - start_ms
 
@@ -601,6 +604,10 @@ class BaseAgent:
             output_summary=output[:3000],
             duration_ms=duration_ms,
         )
+
+        # Fire Langfuse update async — never blocks pipeline
+        if obs:
+            asyncio.create_task(self._emit_langfuse_async(obs, output, usage_details))
 
         # Build state delta
         delta = self._parse_output(state, output)

@@ -81,7 +81,18 @@ async def run_build(human_intent: str, needs_ai: bool = False):
     console.print("\n[bold green]▶ Pipeline starting...[/bold green]\n")
 
     try:
-        final_state = await graph.ainvoke(initial_state)
+        # Stream each node's output as it completes
+        final_state = None
+        async for chunk in graph.astream(initial_state):
+            if chunk:
+                # Print streaming node output
+                for node_id, node_data in chunk.items():
+                    if isinstance(node_data, dict) and "echo_reports" in node_data:
+                        reports = node_data["echo_reports"]
+                        if reports:
+                            last_report = reports[-1]
+                            console.print(f"[dim]  → {last_report.get('agent_id', node_id)}: score {last_report.get('composite_score', '?')}[/dim]")
+            final_state = chunk
         console.print("\n[bold green]✓ Build complete.[/bold green]")
         return final_state
     except Exception as e:
@@ -165,6 +176,15 @@ async def force_evolve():
     for r in records:
         console.print(f"  {r['agent_id']}: v{r['from_version']} → v{r['to_version']}")
 
+async def evolve_targeted(agent_ids: list[str]):
+    """Targeted evolution for specific agents only."""
+    memoria, _, darwin, _ = await boot()
+    console.print(f"[bold yellow]⚡ Targeted evolution for: {', '.join(agent_ids)}[/bold yellow]")
+    records = await darwin.evolve_agents([a.upper() for a in agent_ids])
+    console.print(f"[green]✓ Evolved {len(records)} agent(s)[/green]")
+    for r in records:
+        console.print(f"  {r['agent_id']}: v{r['from_version']} → v{r['to_version']}")
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  Interactive REPL
@@ -212,7 +232,14 @@ async def interactive_mode():
         initial_state = create_initial_state(intent, needs_ai)
 
         try:
-            await graph.ainvoke(initial_state)
+            async for chunk in graph.astream(initial_state):
+                if chunk:
+                    for node_id, node_data in chunk.items():
+                        if isinstance(node_data, dict) and "echo_reports" in node_data:
+                            reports = node_data["echo_reports"]
+                            if reports:
+                                last_report = reports[-1]
+                                console.print(f"[dim]  → {last_report.get('agent_id', node_id)}: score {last_report.get('composite_score', '?')}[/dim]")
         except Exception as e:
             console.print(f"[red]Error: {e}[/red]")
 
@@ -239,6 +266,7 @@ Examples:
     parser.add_argument("--ai",          action="store_true", help="Force activate WEAVE")
     parser.add_argument("--health",      action="store_true", help="Show team health dashboard")
     parser.add_argument("--evolve",      action="store_true", help="Force evolve all agents")
+    parser.add_argument("--evolve-agents", nargs="+", metavar="AGENT", help="Targeted evolution for specific agents (e.g., --evolve-agents FORGE PIXEL)")
     parser.add_argument("--history",     metavar="AGENT",     help="Show agent evolution history")
     parser.add_argument("--interactive", action="store_true", help="REPL mode")
 
