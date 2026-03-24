@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AgentCraft — AI Frontend Builder</title>
+
+  <!-- Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist:wght@300;400;500;600&display=swap" rel="stylesheet" />
+
+  <!-- Icons -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@3/tabler-icons.min.css" />
+
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div id="app">
+    <!-- ═══════════════════════════════════════
+         SIDEBAR — Project History & Navigation
+    ═══════════════════════════════════════ -->
+    <aside id="sidebar" class="sidebar">
+      <div class="sidebar-header">
+        <div class="brand">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+            <path d="M12 2L2 7L12 12L22 7L12 2Z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+            <path d="M2 17L12 22L22 17" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+            <path d="M2 12L12 17L22 12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          <span>AgentCraft</span>
+        </div>
+        <button class="icon-btn" id="new-project-btn" title="New Project" aria-label="New Project">
+          <i class="ti ti-plus"></i>
+        </button>
+      </div>
+
+      <div class="sidebar-section-label">Projects</div>
+
+      <nav id="project-list" class="project-list" role="list" aria-label="Saved projects">
+        <!-- Populated by JS -->
+      </nav>
+
+      <div class="sidebar-footer">
+        <div class="sidebar-section-label">Account</div>
+        <button class="account-btn" id="api-key-btn" aria-label="Manage API Key">
+          <i class="ti ti-key"></i>
+          <span id="api-key-status">Set API Key</span>
+        </button>
+        <button class="account-btn" id="tier-toggle-btn" aria-label="Toggle Tier">
+          <i class="ti ti-crown"></i>
+          <span id="tier-label">Free Tier</span>
+        </button>
+      </div>
+    </aside>
+
+    <!-- ═══════════════════════════════════════
+         MAIN WORKSPACE
+    ═══════════════════════════════════════ -->
+    <main id="workspace" class="workspace">
+      <!-- Top Bar -->
+      <header class="topbar">
+        <div class="topbar-left">
+          <button class="icon-btn sidebar-toggle" id="sidebar-toggle" aria-label="Toggle Sidebar" aria-expanded="true">
+            <i class="ti ti-layout-sidebar-left-expand"></i>
+          </button>
+          <div class="project-title-area">
+            <input
+              id="project-name"
+              class="project-title-input"
+              type="text"
+              value="Untitled Project"
+              spellcheck="false"
+              aria-label="Project name"
+              maxlength="60"
+            />
+          </div>
+        </div>
+        <div class="topbar-right">
+          <div class="tier-badge" id="tier-badge" title="Your current plan">
+            <i class="ti ti-bolt"></i>
+            <span id="tier-badge-label">Free</span>
+          </div>
+          <button class="btn btn-ghost" id="import-btn" aria-label="Import HTML">
+            <i class="ti ti-upload"></i>
+            Import
+          </button>
+          <button class="btn btn-primary" id="build-btn" aria-label="Build Frontend">
+            <i class="ti ti-spark"></i>
+            Build
+          </button>
+        </div>
+      </header>
+
+      <!-- ═══════════════════════════════════════
+           EDITOR + PREVIEW PANES
+      ═══════════════════════════════════════ -->
+      <div class="panes">
+        <!-- LEFT: Code Editor -->
+        <section class="pane editor-pane" id="editor-pane" aria-label="Code Editor">
+          <div class="pane-toolbar">
+            <div class="pane-tabs" role="tablist" aria-label="Editor tabs">
+              <button class="pane-tab active" role="tab" aria-selected="true" data-tab="html">
+                <i class="ti ti-file-code"></i>
+                HTML
+              </button>
+              <button class="pane-tab" role="tab" aria-selected="false" data-tab="css">
+                <i class="ti ti-file-code"></i>
+                CSS
+              </button>
+              <button class="pane-tab" role="tab" aria-selected="false" data-tab="js">
+                <i class="ti ti-file-code"></i>
+                JS
+              </button>
+            </div>
+            <div class="pane-actions">
+              <button class="icon-btn" id="format-btn" title="Format Code" aria-label="Format code">
+                <i class="ti ti-align-left"></i>
+              </button>
+              <button class="icon-btn" id="copy-btn" title="Copy Code" aria-label="Copy to clipboard">
+                <i class="ti ti-copy"></i>
+              </button>
+            </div>
+          </div>
+          <div class="editor-wrapper">
+            <div class="line-numbers" id="line-numbers" aria-hidden="true"></div>
+            <textarea
+              id="code-editor"
+              class="code-editor"
+              spellcheck="false"
+              autocorrect="off"
+              autocapitalize="off"
+              aria-label="Code editor"
+              placeholder="Describe your frontend in plain language, or write HTML directly..."
+            ></textarea>
+          </div>
+          <div class="pane-statusbar">
+            <span id="char-count">0 chars</span>
+            <span id="line-col-info">Ln 1, Col 1</span>
+          </div>
+        </section>
+
+        <!-- RESIZE HANDLE -->
+        <div class="resize-handle" id="resize-handle" role="separator" aria-orientation="vertical" aria-label="Resize panes" tabindex="0"></div>
+
+        <!-- RIGHT: Preview -->
+        <section class="pane preview-pane" id="preview-pane" aria-label="Live Preview">
+          <div class="pane-toolbar">
+            <span class="pane-label">
+              <i class="ti ti-eye"></i>
+              Preview
+            </span>
+            <div class="pane-actions">
+              <button class="icon-btn" id="refresh-btn" title="Refresh Preview" aria-label="Refresh preview">
+                <i class="ti ti-refresh"></i>
+              </button>
+              <button class="icon-btn" id="open-new-tab-btn" title="Open in New Tab" aria-label="Open preview in new tab">
+                <i class="ti ti-external-link"></i>
+              </button>
+              <div class="device-switcher" role="group" aria-label="Device preview size">
+                <button class="device-btn" data-device="desktop" title="Desktop view" aria-pressed="true">
+                  <i class="ti ti-device-desktop"></i>
+                </button>
+                <button class="device-btn" data-device="tablet" title="Tablet view" aria-pressed="false">
+                  <i class="ti ti-device-tablet"></i>
+                </button>
+                <button class="device-btn" data-device="mobile" title="Mobile view" aria-pressed="false">
+                  <i class="ti ti-device-mobile"></i>
+                </button>
+              </div>
+            </div>
+          </div>
+          <div class="preview-frame-wrapper" id="preview-frame-wrapper">
+            <iframe
+              id="preview-frame"
+              class="preview-frame"
+              title="Frontend preview"
+              sandbox="allow-scripts allow-modals"
+            ></iframe>
+          </div>
+          <div class="pane-statusbar">
+            <span id="preview-status">Ready</span>
+            <span id="preview-dimensions">100%</span>
+          </div>
+        </section>
+      </div>
+
+      <!-- ═══════════════════════════════════════
+           BUILD QUEUE / STATUS PANEL
+      ═══════════════════════════════════════ -->
+      <div class="build-panel" id="build-panel" aria-live="polite" aria-label="Build status" hidden>
+        <div class="build-panel-header">
+          <div class="build-panel-title">
+            <i class="ti ti-spark"></i>
+            <span id="build-status-label">Building...</span>
+          </div>
+          <button class="icon-btn" id="close-build-panel" aria-label="Close build panel">
+            <i class="ti ti-x"></i>
+          </button>
+        </div>
+        <div class="build-log" id="build-log" role="log" aria-live="polite">
+          <!-- Build log entries -->
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <!-- ═══════════════════════════════════════
+       MODALS
+  ═══════════════════════════════════════ -->
+
+  <!-- API Key Modal -->
+  <div class="modal-overlay" id="api-key-modal" role="dialog" aria-modal="true" aria-labelledby="api-key-modal-title" hidden>
+    <div class="modal">
+      <div class="modal-header">
+        <h2 id="api-key-modal-title" class="modal-title">API Key Configuration</h2>
+        <button class="icon-btn modal-close" id="close-api-key-modal" aria-label="Close modal">
+          <i class="ti ti-x"></i>
+        </button>
+      </div>
+      <div class="modal-body">
+        <div class="tier-comparison">
+          <div class="tier-card" id="free-tier-card">
+            <div class="tier-name">
+              <i class="ti ti-zap"></i>
+              Free Tier
+            </div>
+            <ul class="tier-features">
+              <li>Bring your own API key</li>
+              <li>Full code generation</li>
+              <li>Project persistence</li>
+              <li>3 concurrent projects</li>
+            </ul>
+            <div class="tier-note">Uses your Moonshot API key securely in-browser.</div>
+          </div>
+          <div class="tier-card featured" id="premium-tier-card">
+            <div class="tier-badge-corner">Recommended</div>
+            <div class="tier-name">
+              <i class="ti ti-crown"></i>
+              AgentCraft Premium
+            </div>
+            <ul class="tier-features">
+              <li>Hosted API keys included</li>
+              <li>Priority generation</li>
+              <li>Unlimited projects</li>
+              <li>Export to GitHub</li>
+            </ul>
+            <div class="tier-note">Subscribe for hosted access — no API key needed.</div>
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label" for="api-key-input">
+            Moonshot API Key
+            <span class="form-hint">(k1-... from <a href="https://platform.moonshot.cn" target="_blank" rel="noopener">platform.moonshot.cn</a>)</span>
+          </label>
+          <div class="input-with-action">
+            <input
+              id="api-key-input"
+              class="form-input"
+              type="password"
+              placeholder="sk-..."
+              autocomplete="off"
+              spellcheck="false"
+              aria-describedby="api-key-hint"
+            />
+            <button class="btn btn-ghost" id="toggle-api-key-visibility" type="button" aria-label="Toggle key visibility">
+              <i class="ti ti-eye"></i>
+            </button>
+          </div>
+          <p id="api-key-hint" class="form-hint">
+            Your key is stored locally in your browser and never sent to any server except the Moonshot API directly.
+          </p>
+          <p class="form-error" id="api-key-error" hidden aria-live="polite"></p>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label" for="base-url-input">API Base URL</label>
+          <input
+            id="base-url-input"
+            class="form-input"
+            type="url"
+            value="https://api.moonshot.cn/v1"
+            placeholder="https://api.moonshot.cn/v1"
+            spellcheck="false"
+          />
+          <p class="form-hint">Default: Moonshot's official API endpoint.</p>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-ghost" id="clear-api-key-btn" type="button">Clear Key</button>
+        <button class="btn btn-primary" id="save-api-key-btn" type="button">Save Configuration</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Export Modal -->
+  <div class="modal-overlay" id="export-modal" role="dialog" aria-modal="true" aria-labelledby="export-modal-title" hidden>
+    <div class="modal modal-sm">
+      <div class="modal-header">
+        <h2 id="export-modal-title" class="modal-title">Export Project</h2>
+        <button class="icon-btn modal-close" id="close-export-modal" aria-label="Close modal">
+          <i class="ti ti-x"></i>
+        </button>
+      </div>
+      <div class="modal-body">
+        <div class="export-options">
+          <button class="export-option" id="export-html-btn" data-format="html">
+            <i class="ti ti-file-code"></i>
+            <div>
+              <div class="export-option-name">Single HTML File</div>
+              <div class="export-option-desc">Standalone file with inline CSS/JS</div>
+            </div>
+          </button>
+          <button class="export-option" id="export-zip-btn" data-format="zip">
+            <i class="ti ti-file-zip"></i>
+            <div>
+              <div class="export-option-name">Project Folder</div>
+              <div class="export-option-desc">Separate HTML, CSS, JS files</div>
+            </div>
+          </button>
+          <button class="export-option" id="export-github-btn" data-format="github">
+            <i class="ti ti-brand-github"></i>
+            <div>
+              <div class="export-option-name">GitHub Pages</div>
+              <div class="export-option-desc">Push to a new GitHub repository</div>
+            </div>
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js" type="module"></script>
+</body>
+</html>
