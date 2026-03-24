@@ -34,6 +34,47 @@ from heart.memoria import Memoria
 from heart.echo import Echo
 import config
 
+# Agents whose output is code — receive the disciplined programmer prologue
+CODE_GENERATING_AGENTS = {"PIXEL", "FORGE", "VAULT", "CIPHER", "WEAVE", "PROBE", "LENS"}
+
+# Seven Pillars / Algorithm-First prologue injected into code-generating agents
+DISCIPLINED_PROGRAMMER_PROLOGUE = """
+
+CRITICAL — CODE WRITING RULES (always follow):
+You must produce code using the Seven Pillars of Programming and Algorithm-First approach.
+
+ALGORITHM FIRST — before writing ANY code, you MUST state the algorithm:
+1. GOAL — What problem does this solve?
+2. INPUT — What data does it receive?
+3. OUTPUT — What does it produce or display?
+4. STEPS — Numbered plain-English walkthrough of the logic.
+
+MANDATORY CODE STANDARDS:
+- PILLAR I: Every variable has a full descriptive name (no abbreviations), type comment, and initial value.
+  ✅ customerAge = 0  # Integer
+  ❌ ca = 0
+- PILLAR II: Explicitly convert all string input to numbers before arithmetic.
+- PILLAR III: Separate print(question) → declare variable → input() into three distinct steps.
+- PILLAR IV: Use nested if statements instead of compound booleans. Always include else.
+  ✅ if age >= 18:
+      if score >= 50: print("yes")
+      else: print("score low")
+  else: print("no")
+- PILLAR V: Always use a keepGoing Boolean sentry variable for loops. Never use while True or break.
+  ✅ keepGoing = True  # Boolean
+  while keepGoing:
+      if userQuit: keepGoing = False
+  # end while
+- PILLAR VI: One function = one job. Every function gets a documentation block (GOAL/INPUT/OUTPUT/STEPS).
+- PILLAR VII: Use lists for ordered collections. Use classes to bundle properties + methods.
+- STANDARD: No abbreviations. No one-liners or ternary operators for non-trivial logic. No premature optimization.
+- STANDARD: Label every closing structure: # end if / # end while / # end for / # end function.
+- STANDARD: No code before the algorithm has been stated and approved.
+
+DEBUG RULE: If code fails, shut the editor and return to the algorithm. The bug is almost always a logic failure, not syntax.
+
+""".strip()
+
 # Default genesis prompts — these are generation 0 for every agent
 # DARWIN will improve these over time via genome evolution
 GENESIS_PROMPTS: Dict[str, str] = {
@@ -530,8 +571,16 @@ class BaseAgent:
                         max_tokens=max_tokens,
                         temperature=temperature,
                         messages=[
-                            {"role": "system", "content": genome["system_prompt"]},
-                            {"role": "user", "content": user_message}
+                            {
+                                "role": "system",
+                                "content": (
+                                    DISCIPLINED_PROGRAMMER_PROLOGUE + "\n\n"
+                                    + genome["system_prompt"]
+                                    if self.agent_id in CODE_GENERATING_AGENTS
+                                    else genome["system_prompt"]
+                                ),
+                            },
+                            {"role": "user", "content": user_message},
                         ]
                     )
                     last_error = None
