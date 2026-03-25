@@ -46,3 +46,4 @@ archive/
 # VSCode / personal workspace
 *.code-workspace
 .serena/
+pipeline_events.jsonl
